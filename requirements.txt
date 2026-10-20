@@ -1,0 +1,8 @@
+# Runtime-зависимости. Всё, что нужно контейнеру.
+aiosqlite==0.22.1
+mutagen==1.48.1
+cryptography==50.0.2
+fastapi==0.121.0
+uvicorn[standard]==0.40.0
+watchdog==6.0.0
+websockets==15.0.1

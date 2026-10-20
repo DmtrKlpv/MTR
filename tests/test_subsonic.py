@@ -1,0 +1,560 @@
+"""Тесты этапа 3: Subsonic-авторизация и протокол.
+
+Проверяем именно то, на чём ломаются клиенты: три способа передачи пароля,
+коды ошибок в теле при HTTP 200, группировку исполнителей и то, что
+/stream больше не открыт анонимно.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import AsyncIterator
+
+import httpx
+import pytest
+
+from app.subsonic.auth import AuthThrottle, md5_hex, throttle_key
+from app.subsonic.errors import ErrorCode
+from tests.conftest import make_flac, make_mp3, tag_mp3
+
+PASSWORD = "secretpass123"
+USERNAME = "alice"
+
+
+def token_for(password: str, salt: str) -> str:
+    return hashlib.md5((password + salt).encode("utf-8")).hexdigest()
+
+
+def auth_params(
+    *,
+    username: str = USERNAME,
+    password: str = PASSWORD,
+    salt: str = "abcdef123456",
+    token: str | None = None,
+    version: str = "1.16.1",
+    client: str = "test",
+) -> dict[str, str]:
+    """Параметры успешной token-авторизации."""
+    return {
+        "u": username,
+        "t": token or token_for(password, salt),
+        "s": salt,
+        "v": version,
+        "c": client,
+        "f": "json",
+    }
+
+
+@pytest.fixture
+async def api(settings, monkeypatch) -> AsyncIterator[tuple[httpx.AsyncClient, object]]:
+    """HTTP-клиент с поднятым приложением и созданным пользователем."""
+    monkeypatch.setenv("MUSIC_DIR", str(settings.music_dir))
+    monkeypatch.setenv("DATA_DIR", str(settings.data_dir))
+    monkeypatch.setenv("MTR_SECRET_KEY", settings.secret_key or "test")
+
+    from app.main import app
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with app.router.lifespan_context(app):
+            await app.state.ctx.users.create_user(USERNAME, PASSWORD, role="user")
+            await app.state.ctx.users.create_user(
+                "root", PASSWORD, role="admin"
+            )
+            yield client, app
+
+
+def body(response: httpx.Response) -> dict:
+    """Тело subsonic-response без внешнего конверта."""
+    return response.json()["subsonic-response"]
+
+
+# ----------------------------------------------------------------------
+# ping: базовый контракт протокола
+# ----------------------------------------------------------------------
+async def test_ping_ok(api):
+    client, _ = api
+    r = await client.get("/rest/ping.view", params=auth_params())
+    assert r.status_code == 200
+    payload = body(r)
+    assert payload["status"] == "ok"
+    assert payload["version"] == "1.16.1"
+    assert payload["type"] == "mtr"
+    assert payload["openSubsonic"] is True
+
+
+async def test_ping_without_view_suffix(api):
+    """Клиенты зовут и /ping, и /ping.view."""
+    client, _ = api
+    r = await client.get("/rest/ping", params=auth_params())
+    assert body(r)["status"] == "ok"
+
+
+# ----------------------------------------------------------------------
+# Три способа авторизации
+# ----------------------------------------------------------------------
+async def test_token_auth(api):
+    client, _ = api
+    r = await client.get("/rest/ping.view", params=auth_params())
+    assert body(r)["status"] == "ok"
+
+
+async def test_plain_password_auth(api):
+    """Параметр p принимается (устаревший способ), но это не ошибка."""
+    client, _ = api
+    r = await client.get(
+        "/rest/ping.view",
+        params={"u": USERNAME, "p": PASSWORD, "v": "1.16.1", "c": "old", "f": "json"},
+    )
+    assert body(r)["status"] == "ok"
+
+
+async def test_hex_encoded_password_auth(api):
+    """p=enc:<hex> — именно так шлют старые клиенты."""
+    client, _ = api
+    r = await client.get(
+        "/rest/ping.view",
+        params={
+            "u": USERNAME,
+            "p": "enc:" + PASSWORD.encode().hex(),
+            "v": "1.16.1",
+            "c": "old",
+            "f": "json",
+        },
+    )
+    assert body(r)["status"] == "ok"
+
+
+async def test_invalid_hex_password_rejected(api):
+    client, _ = api
+    r = await client.get(
+        "/rest/ping.view",
+        params={"u": USERNAME, "p": "enc:zzzz", "v": "1.16.1", "c": "x", "f": "json"},
+    )
+    payload = body(r)
+    assert payload["status"] == "failed"
+    assert payload["error"]["code"] == ErrorCode.GENERIC
+
+
+async def test_wrong_token_gives_40(api):
+    client, _ = api
+    params = auth_params(token="0" * 32)
+    r = await client.get("/rest/ping.view", params=params)
+    payload = body(r)
+    assert r.status_code == 200          # протокол требует 200
+    assert payload["status"] == "failed"
+    assert payload["error"]["code"] == ErrorCode.WRONG_CREDENTIALS
+
+
+async def test_wrong_password_gives_40(api):
+    client, _ = api
+    params = auth_params(password="wrong")
+    r = await client.get("/rest/ping.view", params=params)
+    assert body(r)["error"]["code"] == ErrorCode.WRONG_CREDENTIALS
+
+
+async def test_unknown_user_gives_same_error_as_wrong_password(api):
+    """Нельзя различать «нет такого» и «неверный пароль» — иначе перебор логинов."""
+    client, _ = api
+    r1 = await client.get("/rest/ping.view", params=auth_params(username="nobody"))
+    r2 = await client.get("/rest/ping.view", params=auth_params(password="wrong"))
+    assert body(r1)["error"] == body(r2)["error"]
+
+
+async def test_missing_username_gives_10(api):
+    client, _ = api
+    r = await client.get("/rest/ping.view", params={"v": "1.16.1", "c": "x"})
+    assert body(r)["error"]["code"] == ErrorCode.MISSING_PARAMETER
+
+
+async def test_missing_version_gives_10(api):
+    client, _ = api
+    r = await client.get("/rest/ping.view", params={"u": USERNAME, "c": "x"})
+    assert body(r)["error"]["code"] == ErrorCode.MISSING_PARAMETER
+
+
+async def test_token_without_salt_gives_10(api):
+    client, _ = api
+    r = await client.get(
+        "/rest/ping.view",
+        params={"u": USERNAME, "t": "0" * 32, "v": "1.16.1", "c": "x"},
+    )
+    assert body(r)["error"]["code"] == ErrorCode.MISSING_PARAMETER
+
+
+async def test_jwt_rejected_with_41(api):
+    """JWT не поддерживаем, но отвечаем честным кодом, а не «неверный пароль»."""
+    client, _ = api
+    r = await client.get(
+        "/rest/ping.view",
+        params={"u": USERNAME, "jwt": "abc", "v": "1.16.1", "c": "x"},
+    )
+    assert body(r)["error"]["code"] == ErrorCode.TOKEN_AUTH_UNSUPPORTED
+
+
+async def test_inactive_user_cannot_login(api):
+    """Заблокированная учётка не проходит Subsonic-авторизацию.
+
+    Блокируем обычного пользователя: последнего активного админа
+    репозиторий запрещает блокировать, и это правильно.
+    """
+    client, app = api
+    record = await app.state.ctx.users.get_by_username(USERNAME)
+    await app.state.ctx.users.set_active(record.id, False)
+    r = await client.get("/rest/ping.view", params=auth_params())
+    assert body(r)["error"]["code"] == ErrorCode.WRONG_CREDENTIALS
+
+
+async def test_salt_case_and_length_tolerated(api):
+    """Короткая соль — предупреждение в лог, но обслуживаем."""
+    client, _ = api
+    salt = "ab12"
+    r = await client.get(
+        "/rest/ping.view",
+        params={
+            "u": USERNAME,
+            "t": token_for(PASSWORD, salt),
+            "s": salt,
+            "v": "1.16.1",
+            "c": "x",
+        },
+    )
+    assert body(r)["status"] == "ok"
+
+
+async def test_token_uppercase_accepted(api):
+    """Некоторые клиенты присылают md5 в верхнем регистре."""
+    client, _ = api
+    salt = "abcdef123456"
+    r = await client.get(
+        "/rest/ping.view",
+        params={
+            "u": USERNAME,
+            "t": token_for(PASSWORD, salt).upper(),
+            "s": salt,
+            "v": "1.16.1",
+            "c": "x",
+        },
+    )
+    assert body(r)["status"] == "ok"
+
+
+# ----------------------------------------------------------------------
+# Троттлинг
+# ----------------------------------------------------------------------
+def test_throttle_blocks_after_failures():
+    throttle = AuthThrottle()
+    key = throttle_key("bob", "1.2.3.4")
+    for _ in range(10):
+        throttle.record_failure(key)
+    assert throttle.is_blocked(key) is True
+
+
+def test_throttle_reset_clears():
+    throttle = AuthThrottle()
+    key = throttle_key("bob", "1.2.3.4")
+    for _ in range(10):
+        throttle.record_failure(key)
+    throttle.reset(key)
+    assert throttle.is_blocked(key) is False
+
+
+def test_throttle_is_per_ip_and_user():
+    throttle = AuthThrottle()
+    k1 = throttle_key("bob", "1.1.1.1")
+    k2 = throttle_key("bob", "2.2.2.2")
+    for _ in range(10):
+        throttle.record_failure(k1)
+    assert throttle.is_blocked(k1)
+    assert not throttle.is_blocked(k2)
+
+
+def test_md5_hex_matches_hashlib():
+    assert md5_hex("abc") == hashlib.md5(b"abc").hexdigest()
+
+
+async def test_throttle_returns_40_after_many_failures(api):
+    client, _ = api
+    for _ in range(11):
+        await client.get("/rest/ping.view", params=auth_params(password="wrong"))
+    # Даже верный пароль теперь отклоняется — но код ошибки тот же.
+    r = await client.get("/rest/ping.view", params=auth_params())
+    assert body(r)["error"]["code"] == ErrorCode.WRONG_CREDENTIALS
+
+
+# ----------------------------------------------------------------------
+# Бинарные методы: честные HTTP-статусы
+# ----------------------------------------------------------------------
+async def test_stream_requires_auth_401(api, music_dir):
+    client, app = api
+    path = make_mp3(music_dir / "a.mp3")
+    tag_mp3(path, title="A")
+    await app.state.ctx.scanner.scan(mode="full")
+    track = (await app.state.ctx.tracks.list_tracks())[0]
+
+    r = await client.get("/rest/stream.view", params={"id": str(track.id)})
+    assert r.status_code == 401
+    assert r.headers.get("www-authenticate", "").startswith("Subsonic")
+
+
+async def test_stream_with_auth_returns_audio(api, music_dir):
+    client, app = api
+    path = make_mp3(music_dir / "b.mp3")
+    tag_mp3(path, title="B")
+    await app.state.ctx.scanner.scan(mode="full")
+    track = (await app.state.ctx.tracks.list_tracks())[0]
+
+    r = await client.get(
+        "/rest/stream.view", params={**auth_params(), "id": str(track.id)}
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("audio/")
+
+
+async def test_stream_unknown_id_gives_subsonic_70(api):
+    client, _ = api
+    r = await client.get(
+        "/rest/stream.view", params={**auth_params(), "id": "999999"}
+    )
+    assert body(r)["error"]["code"] == ErrorCode.NOT_FOUND
+
+
+async def test_download_returns_original(api, music_dir):
+    client, app = api
+    path = make_flac(music_dir / "c.flac")
+    await app.state.ctx.scanner.scan(mode="full")
+    track = (await app.state.ctx.tracks.list_tracks())[0]
+
+    r = await client.get(
+        "/rest/download.view", params={**auth_params(), "id": str(track.id)}
+    )
+    assert r.status_code == 200
+    assert r.content[:4] == b"fLaC"
+    assert "attachment" in r.headers.get("content-disposition", "")
+
+
+# ----------------------------------------------------------------------
+# Библиотека
+# ----------------------------------------------------------------------
+@pytest.fixture
+async def lib(api, music_dir):
+    """Библиотека: два исполнителя, три альбома, четыре трека."""
+    client, app = api
+    plan = [
+        ("Queen", "A Night at the Opera", "Bohemian Rhapsody", 11),
+        ("Queen", "A Night at the Opera", "Love of My Life", 2),
+        ("Queen", "Jazz", "Bicycle Race", 1),
+        ("Виктор Цой", "Группа крови", "Кино", 6),
+    ]
+    for index, (artist, album, title, track_no) in enumerate(plan):
+        path = make_mp3(music_dir / artist.replace(" ", "_") / f"{index}.mp3")
+        tag_mp3(
+            path, title=title, artist=artist, album=album,
+            track=str(track_no), year="1978", genre="Rock",
+        )
+    await app.state.ctx.scanner.scan(mode="full")
+    return client, app
+
+
+async def test_get_artists_groups_by_letter(lib):
+    client, _ = lib
+    r = await client.get("/rest/getArtists.view", params=auth_params())
+    payload = body(r)["artists"]
+    letters = [index["name"] for index in payload["index"]]
+    assert "Q" in letters
+    # Кириллица уходит в «#», а не в отдельную букву.
+    assert "#" in letters
+    queen = next(
+        artist
+        for index in payload["index"]
+        for artist in index["artist"]
+        if artist["name"] == "Queen"
+    )
+    assert queen["albumCount"] == 2
+
+
+async def test_get_album_returns_songs_in_order(lib):
+    client, app = lib
+    albums = await app.state.ctx.library.list_albums(limit=50)
+    opera = next(a for a in albums if a.name == "A Night at the Opera")
+
+    r = await client.get(
+        "/rest/getAlbum.view", params={**auth_params(), "id": str(opera.id)}
+    )
+    album = body(r)["album"]
+    assert album["name"] == "A Night at the Opera"
+    assert album["songCount"] == 2
+    # Порядок по номеру трека: Love of My Life (2) раньше Bohemian (11)
+    assert [song["title"] for song in album["song"]] == [
+        "Love of My Life",
+        "Bohemian Rhapsody",
+    ]
+    assert album["song"][0]["duration"] >= 0
+    assert album["song"][0]["suffix"] == "mp3"
+
+
+async def test_get_album_list2_sorting(lib):
+    client, _ = lib
+    r = await client.get(
+        "/rest/getAlbumList2.view",
+        params={**auth_params(), "type": "alphabeticalByName", "size": "10"},
+    )
+    albums = body(r)["albumList2"]["album"]
+    names = [album["name"] for album in albums]
+    assert names == sorted(names, key=str.casefold)
+
+
+async def test_get_album_list_legacy_uses_other_key(lib):
+    """getAlbumList (без 2) обязан отдавать ключ albumList, не albumList2."""
+    client, _ = lib
+    r = await client.get(
+        "/rest/getAlbumList.view", params={**auth_params(), "type": "newest"}
+    )
+    payload = body(r)
+    assert "albumList" in payload
+    assert "albumList2" not in payload
+
+
+async def test_get_song(lib):
+    client, app = lib
+    track = (await app.state.ctx.tracks.list_tracks())[0]
+    r = await client.get(
+        "/rest/getSong.view", params={**auth_params(), "id": str(track.id)}
+    )
+    song = body(r)["song"]
+    assert song["id"] == str(track.id)
+    assert song["isDir"] is False
+    assert song["type"] == "music"
+
+
+async def test_search3(lib):
+    client, _ = lib
+    r = await client.get(
+        "/rest/search3.view", params={**auth_params(), "query": "Queen"}
+    )
+    result = body(r)["searchResult3"]
+    assert any(artist["name"] == "Queen" for artist in result["artist"])
+    assert len(result["album"]) == 2
+    assert len(result["song"]) == 3
+
+
+async def test_search3_empty_query_is_ok(api):
+    """Пустой запрос — пустой успешный ответ, а не ошибка 10."""
+    client, _ = api
+    r = await client.get("/rest/search3.view", params={**auth_params(), "query": ""})
+    payload = body(r)
+    assert payload["status"] == "ok"
+    assert payload["searchResult3"]["song"] == []
+
+
+async def test_search_escapes_like_wildcards(lib):
+    """Символ % в запросе не должен работать как wildcard."""
+    client, _ = lib
+    r = await client.get(
+        "/rest/search3.view", params={**auth_params(), "query": "%"}
+    )
+    assert body(r)["searchResult3"]["song"] == []
+
+
+async def test_get_genres(lib):
+    client, _ = lib
+    r = await client.get("/rest/getGenres.view", params=auth_params())
+    genres = body(r)["genres"]["genre"]
+    rock = next(g for g in genres if g["value"] == "Rock")
+    assert rock["songCount"] == 4
+    assert rock["albumCount"] == 3
+
+
+async def test_get_music_folders(lib):
+    client, _ = lib
+    r = await client.get("/rest/getMusicFolders.view", params=auth_params())
+    folders = body(r)["musicFolders"]["musicFolder"]
+    assert len(folders) == 1
+    assert folders[0]["id"] == 1
+
+
+# ----------------------------------------------------------------------
+# Роли
+# ----------------------------------------------------------------------
+async def test_get_user_self(lib):
+    client, _ = lib
+    r = await client.get("/rest/getUser.view", params=auth_params())
+    user = body(r)["user"]
+    assert user["username"] == USERNAME
+    assert user["adminRole"] is False
+    assert user["playlistRole"] is True
+    assert user["uploadRole"] is False
+
+
+async def test_get_user_other_denied_for_normal_user(lib):
+    client, _ = lib
+    r = await client.get(
+        "/rest/getUser.view", params={**auth_params(), "username": "root"}
+    )
+    assert body(r)["error"]["code"] == ErrorCode.NOT_AUTHORIZED
+
+
+async def test_get_user_other_allowed_for_admin(lib):
+    client, _ = lib
+    r = await client.get(
+        "/rest/getUser.view", params={**auth_params(username="root"), "username": USERNAME}
+    )
+    assert body(r)["user"]["username"] == USERNAME
+
+
+async def test_get_users_admin_only(lib):
+    client, _ = lib
+    r = await client.get("/rest/getUsers.view", params=auth_params())
+    assert body(r)["error"]["code"] == ErrorCode.NOT_AUTHORIZED
+
+    r = await client.get("/rest/getUsers.view", params=auth_params(username="root"))
+    users = body(r)["users"]["user"]
+    assert {user["username"] for user in users} == {"alice", "root"}
+
+
+async def test_start_scan_admin_only(lib, music_dir):
+    client, app = lib
+    r = await client.get("/rest/startScan.view", params=auth_params())
+    assert body(r)["error"]["code"] == ErrorCode.NOT_AUTHORIZED
+
+    r = await client.get("/rest/startScan.view", params=auth_params(username="root"))
+    assert body(r)["status"] == "ok"
+    assert body(r)["scanStatus"]["count"] == 4
+
+
+async def test_get_license_valid(lib):
+    client, _ = lib
+    r = await client.get("/rest/getLicense.view", params=auth_params())
+    assert body(r)["license"]["valid"] is True
+
+
+# ----------------------------------------------------------------------
+# Прямой /stream тоже закрыт
+# ----------------------------------------------------------------------
+async def test_direct_stream_requires_auth(api, music_dir):
+    client, app = api
+    path = make_mp3(music_dir / "d.mp3")
+    tag_mp3(path, title="D")
+    await app.state.ctx.scanner.scan(mode="full")
+    track = (await app.state.ctx.tracks.list_tracks())[0]
+
+    r = await client.get("/stream", params={"id": track.id})
+    assert r.status_code == 401
+
+    r = await client.get("/stream", params={**auth_params(), "id": track.id})
+    assert r.status_code == 200
+
+
+async def test_max_bit_rate_forces_downscale(api, music_dir):
+    """maxBitRate=128 при FLAC-исходнике обязан дать mp3, а не FLAC."""
+    client, app = api
+    make_flac(music_dir / "e.flac", seconds=1.0)
+    await app.state.ctx.scanner.scan(mode="full")
+    track = (await app.state.ctx.tracks.list_tracks())[0]
+
+    r = await client.get(
+        "/rest/stream.view",
+        params={**auth_params(), "id": str(track.id), "maxBitRate": "128"},
+    )
+    assert r.status_code == 200
+    assert r.headers["X-MTR-Format"] == "mp3_128"

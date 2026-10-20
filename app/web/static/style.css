@@ -1,0 +1,1201 @@
+/* MTR — оформление веб-интерфейса.
+
+   Стиль: почти чёрный холст, панели без рамок, скруглённые «пилюли»
+   для кнопок, крупные карточки с обложками, узкий левый рейл с иконками.
+   Акцентный цвет берётся из theme.css — здесь только var(--accent).
+
+   Порядок: переменные → база → оболочка и рейл → шапка и меню →
+   контент → карточки и строки → формы → плеер → адаптив. */
+
+:root {
+  --bg: #0a0a0b;
+  --rail: #0f0f10;
+  --panel: #141416;
+  --panel-2: #1b1b1e;
+  --panel-3: #232327;
+  --hover: #202024;
+  --line: #232326;
+  --line-2: #2e2e33;
+  --text: #f2f2f4;
+  --muted: #a0a0a8;
+  --muted-2: #6e6e78;
+  --danger: #ff5f5f;
+  --lightdanger: #E9967A;
+  --ok: #4ade80;
+
+  --radius: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+  --gap: 12px;
+
+  --rail-w: 76px;
+  --player-h: 88px;
+  /* Запас под фиксированный плеер: контент не должен под него заезжать. */
+  --player-gap: 16px;
+
+  --fs-h1: 26px;
+  --fs-h2: 22px;
+  --fs-h3: 17px;
+  --fs-body: 15px;
+  --fs-small: 13px;
+  --fs-tiny: 12px;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: var(--fs-body)/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4 { font-weight: 700; margin: 0; letter-spacing: -.01em; }
+h1 { font-size: var(--fs-h1); }
+h2 { font-size: var(--fs-h2); margin-bottom: 14px;margin-top: 14px; }
+h3 { font-size: var(--fs-h3); margin: 28px 0 10px; }
+h4 { font-size: 15px; }
+
+a { color: inherit; text-decoration: none; }
+
+.muted { color: var(--muted); }
+.small { font-size: var(--fs-small); }
+.tiny { font-size: var(--fs-tiny); }
+.mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, sfmono-regular, monospace; }
+.error { color: var(--danger); }
+.warn { color: #e6c15a; }
+.break { word-break: break-all; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* ---------- Оболочка и левый рейл ---------- */
+
+.shell {
+  min-height: 100vh;
+  padding-left: var(--rail-w);
+  /* Плеер фиксированный и лежит поверх контента: без запаса последний
+     блок списка уходил под него. */
+  padding-bottom: calc(var(--player-h) + var(--player-gap));
+}
+
+.rail {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: var(--rail-w);
+  background: var(--rail);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 14px 0 12px;
+  /* Выше плеера (30): иначе шестерёнка и выход оказываются под ним
+     и становятся недоступны. */
+  z-index: 35;
+}
+
+.rail-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 14px;
+  font-size: 9px;
+  letter-spacing: .16em;
+  color: var(--muted-2);
+  font-weight: 700;
+}
+
+.rail-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+}
+
+.rail-sep {
+  width: 32px;
+  height: 1px;
+  background: var(--line-2);
+  margin: 10px 0;
+}
+
+.rail-bottom {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.rail-btn {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.rail-btn:hover { background: var(--hover); color: var(--text); }
+.rail-btn.active {
+  /* Активный пункт — заливка акцентом, иконка чёрная: контраст максимальный
+     и совпадает с поведением кнопок .primary. */
+  background: var(--accent);
+  color: var(--accent);
+}
+.rail-btn.active .icon { opacity: 1; filter: brightness(0) invert(1);}
+.rail-btn[hidden] { display: none; }
+
+/* Тултип-подпись справа от иконки, как на макете */
+.rail-btn::after {
+  content: attr(title);
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--panel-3);
+  color: var(--text);
+  font-size: var(--fs-tiny);
+  font-weight: 500;
+  padding: 6px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s ease;
+  z-index: 60;
+}
+.rail-btn:hover::after { opacity: 1; }
+
+/* ---------- Шапка: только имя пользователя ---------- */
+
+
+/* ---------- Меню настроек ---------- */
+
+.menu {
+  position: absolute;
+  top: calc(100vh - var(--player-h) - 12px);
+  left: calc(var(--rail-w) + 8px);
+  transform: translateY(-100%);
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  padding: 6px;
+  min-width: 200px;
+  z-index: 40;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .6);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.menu[hidden] { display: none; }
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.menu-item:hover { background: var(--hover); }
+.menu-item[hidden] { display: none; }
+
+/* ---------- Контент ---------- */
+
+.view {
+  /* 96% от площади справа от рейла. Считать от окна нельзя: .view
+     находится внутри .shell, у которого слева отступ под рейл, и
+     «96% от окна» минус рейл давало 86–91%. */
+  width: calc((100vw - var(--rail-w)) * 0.96);
+  max-width: 1760px;
+  margin: 0 auto;
+  /* Нижний отступ — воздух над плеером; .shell уже резервирует его высоту. */
+  padding: 4px 0 40px;
+}
+
+.greeting {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -.02em;
+  margin: 8px 0 18px;
+}
+
+/* ---------- Сворачиваемые секции ---------- */
+
+.section { margin: 26px 0; }
+.section .section-head {
+  margin: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.section .section-head > * { flex: none; }
+.section .section-head > .section-toggle { flex: 0 1 auto; }
+
+.section-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  padding: 4px 8px 4px 0;
+  border-radius: var(--radius);
+  color: var(--text);
+  /* У кнопок nowrap, а заголовок длинный («Недавно прослушанные») —
+     без этих двух строк он распирал строку и выталкивал кнопку «Все»
+     за край экрана на телефоне. */
+  min-width: 0;
+  max-width: 100%;
+}
+.section-toggle:hover { background: var(--hover); }
+.section-toggle h2 {
+  margin: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.section-toggle .chevron {
+  transition: transform .15s ease;
+  /* Свёрнуто — стрелка вправо, развёрнуто — вниз. */
+}
+.section-toggle.collapsed .chevron { transform: rotate(-90deg); }
+.section-body { margin-top: 14px; }
+.section-body[hidden] { display: none; }
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 30px 0 14px;
+}
+.section-head h2 { margin: 0; }
+
+/* ---------- Кнопки ---------- */
+
+button {
+  font: inherit;
+  cursor: pointer;
+  /* Иконка и текст в одну строку: раньше «Играть всё» при нехватке
+     ширины ломалась на две строки. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  white-space: nowrap;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 9px 18px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background .12s ease, border-color .12s ease, opacity .12s ease;
+}
+button:hover { background: var(--panel-3); }
+button:disabled { opacity: .5; cursor: default; }
+button[hidden] { display: none; }
+
+.primary {
+  background: var(--accent);
+  color: var(--accentlight);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.primary:hover { background: var(--accent-dark); border-color: var(--accent-dark); }
+
+.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+.ghost:hover { background: var(--hover); }
+
+.danger { color: var(--danger); }
+/*.ghost.danger:hover {border-color: var(--danger);}*/
+.danger-solid {
+  /*background: var(--lightdanger);
+  border-color: var(--lightdanger);*/
+  color: #DC143C;
+  font-weight: 600;
+}
+
+.with-icon { display: inline-flex; align-items: center; gap: 8px; }
+
+/* ---------- Иконки ----------
+   SVG лежат в <img> и нарисованы чёрным; на тёмной теме инвертируются
+   фильтром. Активный цвет задаётся псевдоэлементом с mask: у <img>
+   currentColor не наследуется, а background под картинкой перекрывается
+   её собственными пикселями. */
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  line-height: 0;
+  border-radius: var(--radius-pill);
+}
+
+.icon-btn .icon, .icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+  flex: none;
+  /* SVG нарисованы чёрным: инвертируем под тёмную тему. */
+  filter: invert(1) brightness(1.4);
+  opacity: .82;
+}
+.icon-btn:hover .icon { opacity: 1; }
+/* Активная иконка (перемешать, повтор) — акцентная.
+
+   Тот же приём, что и у сердца: <img> скрываем, а форму рисует
+   псевдоэлемент через mask. Иначе чёрные пиксели файла лежат поверх
+   background-color и перекрывают акцент — на тёмной теме иконка
+   просто исчезает. */
+.icon-btn.active .icon { opacity: 0; }
+.icon-btn.active { position: relative; color: var(--accent); }
+.icon-btn.active::after {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  background-color: var(--accent);
+  -webkit-mask-image: var(--icon-url);
+  mask-image: var(--icon-url);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  pointer-events: none;
+}
+
+/* Акцентная иконка: SVG чёрный, поэтому красим через маску — цвет берётся
+   из --accent и меняется вместе с темой. Работает для любой иконки:
+   путь к файлу лежит в --icon-url, его выставляет icon() в app.js. */
+/* Сердце «в избранном» — акцентное.
+
+   Почему не через mask на самом <img>: картинка рисуется ПОВЕРХ
+   background-color. Маска обрезает элемент целиком, но под ней остаётся
+   и акцентный фон, и чёрные пиксели SVG — они перекрывают фон, и сердце
+   остаётся чёрным (проверено по пикселям: 0 акцентных).
+
+   Поэтому сам <img> скрываем, а акцентное сердце рисуем псевдоэлементом
+   через mask: цвет даёт background-color, форма — файл heart-filled.svg.
+   Меняется вместе с --accent в theme.css. */
+.icon-btn.heart.on .icon { opacity: 0; }
+.icon-btn.heart.on {
+  position: relative;
+  color: var(--accent);
+}
+.icon-btn.heart.on::after {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  background-color: var(--accent);
+  -webkit-mask: url("/static/icons/heart-filled.svg") center / contain no-repeat;
+  mask: url("/static/icons/heart-filled.svg") center / contain no-repeat;
+  pointer-events: none;
+}
+/* Сердце «в избранном» — акцентное. У <img> с SVG внутри currentColor
+   не наследуется: пиксели залиты собственным цветом файла, а filter:
+   invert(1) делает их белыми. Поэтому используем SVG как маску, а цвет
+   задаём фоном — тогда он берётся из --accent и меняется вместе с темой. */
+.icon-btn.heart.on { color: var(--accent); }
+.icon-btn.danger:hover .icon { filter: invert(1) sepia(1) saturate(6) hue-rotate(320deg); opacity: 1; }
+
+/* ---------- Поля ввода ---------- */
+
+input, select, textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  padding: 11px 16px;
+  min-width: 160px;
+}
+select { border-radius: var(--radius); }
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--panel-3);
+}
+input::placeholder { color: var(--muted-2); }
+input.wide { width: 100%; }
+input[type="checkbox"] { min-width: 0; width: 18px; height: 18px; accent-color: var(--accent); padding: 0; }
+input[type="search"] { -webkit-appearance: none; appearance: none; }
+
+.search {
+  flex: 1;
+  min-width: 240px;
+  padding-left: 42px;
+  background-image: url("/static/icons/search.svg");
+  background-repeat: no-repeat;
+  background-position: 14px center;
+  background-size: 17px;
+}
+
+/* ---------- Раскладка блоков ---------- */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: nowrap;
+  margin-top: 12px;
+  margin-bottom: 12px;
+}
+.row.wrap { flex-wrap: wrap; }
+
+.list { display: flex; flex-direction: column; gap: 2px; }
+
+.two-col {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.col { min-width: 0; }
+
+/* ---------- Статистика ---------- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--gap);
+  margin-bottom: 22px;
+}
+.card {
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+}
+.card .value { font-size: 24px; font-weight: 700; line-height: 1.2; }
+.card .label { color: var(--muted); font-size: var(--fs-small); }
+
+/* ---------- Переключатель вида ---------- */
+
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  gap: 4px;
+  background: var(--panel);
+  border-radius: var(--radius-pill);
+  padding: 4px;
+  margin-bottom: 18px;
+}
+.segment {
+  border-radius: var(--radius-pill);
+  background: transparent;
+  padding: 8px 16px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.segment:hover { background: var(--hover); color: var(--text); }
+.segment.active { background: var(--accent); color: var(--accentlight); font-weight: 600; }
+.segment.active:hover { background: var(--accent-dark); }
+
+/* ---------- Альбомы ---------- */
+
+.album-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 18px;
+}
+.album {
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-lg);
+  padding: 0;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  color: var(--text);
+  /* Кнопкам задан nowrap, но у карточки имя должно обрезаться
+     многоточием, а не расширять колонку сетки. */
+  white-space: normal;
+  min-width: 0;
+}
+.album-name, .album-artist { min-width: 0; max-width: 100%; }
+.album:hover { background: transparent; }
+.album-cover {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+  transition: filter .15s ease;
+}
+.album:hover .album-cover { filter: brightness(1.12); }
+.album-name {
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.album-artist { font-size: var(--fs-small); color: var(--muted); }
+
+/* ---------- Исполнители: круглые аватары ---------- */
+
+.artist-grid {
+  /* Сетка, как у альбомов: переносится по строкам, без горизонтальной
+     прокрутки. Раньше был слайдер в один ряд — на телефоне это прятало
+     половину исполнителей за краем экрана. */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 20px 18px;
+}
+.artist {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+.artist:hover { background: transparent; }
+.artist-avatar {
+  width: 100%;
+  max-width: 168px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--panel-2);
+  display: grid;
+  place-items: center;
+  font-size: 30px;
+  font-weight: 700;
+  color: var(--accent-ink);
+  overflow: hidden;
+}
+.artist-avatar.initials { background: var(--accent); }
+.artist-name {
+  font-size: 14px;
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artist-meta { font-size: var(--fs-tiny); color: var(--muted); }
+
+/* ---------- Строка трека ---------- */
+
+.track {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  cursor: default;
+  transition: background .1s ease;
+}
+.track:hover { background: var(--panel); }
+.track.playing { background: var(--panel); }
+.track.playing .track-main strong { color: var(--accent); }
+/* Номер трека в списке: маленькая серая цифра в первой колонке.
+   Ширина фиксированная — строки не «прыгают» между 9 и 100. */
+.track-index {
+  width: 26px;
+  flex: none;
+  text-align: right;
+  font-size: var(--fs-tiny);
+  line-height: 1;
+  color: var(--muted-2);
+  font-variant-numeric: tabular-nums;
+  opacity: .7;
+}
+.track:hover .track-index { opacity: 1; }
+.track.playing .track-index { color: var(--accent); }
+.track-cover {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--panel-2);
+  flex: none;
+}
+.track-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.track-main strong {
+  font-weight: 500;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.track-main .muted { font-size: var(--fs-tiny); }
+
+/* ---------- Плейлисты: три колонки ---------- */
+
+.pl-layout {
+  display: grid;
+  /* Две колонки: слева список с коллажом (было 15%, стало 25%),
+     справа — содержимое выбранного плейлиста. */
+  grid-template-columns: minmax(240px, 25%) minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+.pl-layout > * { min-width: 0; }
+
+/* Коллаж выбранного плейлиста — в начале левой колонки, на всю её ширину. */
+.pl-col-art { margin-bottom: 14px; }
+.pl-col-art .collage {
+  width: 100%;
+  border-radius: var(--radius-lg);
+}
+
+/* Встроенной прокрутки нет: страница прокручивается целиком. */
+.pl-col-list, .pl-col-detail { overflow: visible; }
+
+/* Массовые действия под списком плейлистов. */
+.pl-list-actions { margin-top: 12px; }
+.pl-list-actions .row {
+  /*flex-direction: column;*/
+  align-items: stretch;
+  gap: 6px;
+  margin-top: 0;
+}
+.pl-list-actions .row > button { width: 48%; }
+
+@media (max-width: 900px) {
+  /* Одна колонка: сначала выбранный плейлист, ниже — навигация по списку. */
+  .pl-layout { grid-template-columns: 1fr; gap: 20px; }
+  .pl-col-detail { order: 1; }
+  .pl-col-list { order: 2; }
+  .pl-col-art { margin-bottom: 12px; }
+}
+
+/* ---------- Плейлисты: две колонки ---------- */
+
+.pl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+  padding: 8px;
+}
+.pl-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+}
+.pl-item:hover { background: var(--hover); }
+.pl-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+/* Маленький земной шар: признак публичного плейлиста. */
+.pl-meta .globe {
+  width: 13px;
+  height: 13px;
+  opacity: .55;
+  /* Инверсия как у остальных иконок: SVG нарисован чёрным. */
+  filter: invert(1) brightness(1.4);
+}
+.pl-item.active .pl-meta .globe { opacity: .85; }
+.pl-item.active { background: var(--accent-soft); }
+.pl-item.active .ellipsis { color: var(--accent); font-weight: 600; }
+
+.pl-detail { min-height: 120px; }
+.pl-title { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+/* Заголовок раздела «Плейлисты». */
+.pl-page-title { margin: 10px 0 0 14px; }
+
+/* Шапка раздела: слева название, счётчик и действия, справа создание. */
+.pl-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.pl-page-left { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.pl-page-left h2 { margin: 10px 0 0 14px; }
+.pl-page-sub { margin-left: 14px; color: var(--muted); font-size: 13px; }
+.pl-page-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-left: 14px; }
+.pl-create { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pl-create input { min-width: 220px; }
+/* Заголовок плейлиста в стиле страницы альбома, но мельче:
+   в колонке 40% полноразмерный 40px не помещается. */
+.pl-hero-title { font-size: 30px; margin-bottom: 6px; }
+.album-hero-artist { color: var(--muted); font-size: 15px; }
+
+/* ---------- Коллаж 2x2 из обложек ---------- */
+
+.collage {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 6px;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--panel-2);
+}
+.collage-tile {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: var(--panel-2);
+}
+
+/* ---------- Альбом: большая шапка ---------- */
+
+.album-hero {
+  /* Две равные колонки: слева обложка, справа название, метаданные
+     и кнопки. */
+  display: grid;
+  grid-template-columns: .3fr 1fr;
+  gap: 32px;
+  /* По верхнему краю: при центрировании текст уезжал в середину и
+     выглядел «съехавшим вниз» относительно высокой обложки. */
+  align-items: start;
+  margin-bottom: 28px;
+}
+.album-hero-left { min-width: 0; }
+.album-hero-cover {
+  width: 100%;
+  /* В колонке 50% обложка растягивалась до ~670px и выталкивала список
+     треков за пределы экрана. Ограничиваем: колонка остаётся 50%,
+     но картинка не раздувается. */
+  max-width: 420px;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+}
+.album-hero-info { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.album-hero-title {
+  font-size: 40px;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -.02em;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Настройки, ключ-значение ---------- */
+
+.settings { display: flex; flex-direction: column; gap: 4px; max-width: 820px; }
+.setting {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.setting:last-child { border-bottom: 0; }
+.setting-text { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.setting-text strong { font-weight: 500; font-size: 14px; }
+.setting-control { flex: none; }
+.setting-control input, .setting-control select { min-width: 0; }
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  align-self: flex-start;
+  font-weight: 600;
+}
+.badge.status-completed { background: rgba(74, 222, 128, .14); color: var(--ok); }
+.badge.status-failed { background: rgba(255, 95, 95, .14); color: var(--danger); }
+.badge.status-running { background: var(--accent-soft); color: var(--accent); }
+
+.kv {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 10px 18px;
+  margin-bottom: 22px;
+}
+.kv > span:nth-child(odd) { color: var(--muted); font-size: var(--fs-small); }
+.kv > span:nth-child(even) { overflow-wrap: anywhere; }
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 10px 16px;
+  align-items: center;
+  margin: 16px 0;
+  max-width: 780px;
+}
+.form-grid label { font-size: var(--fs-small); color: var(--muted); }
+.form-grid input { width: 100%; min-width: 0; }
+
+label.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+
+.empty-state { padding: 26px 0; }
+.empty-state p { margin: 0 0 6px; }
+
+/* ---------- Сканирование ---------- */
+
+.progress {
+  height: 8px;
+  background: var(--panel-2);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  margin: 16px 0 10px;
+}
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width .3s ease;
+}
+.progress-fill.running { background: linear-gradient(90deg, var(--accent), var(--accent-dark)); }
+.progress-fill.failed { background: var(--danger); }
+.scan-info { margin-bottom: 16px; font-size: var(--fs-small); color: var(--muted); }
+.scan-run { padding: 8px 0; border-bottom: 1px solid var(--line); }
+
+/* ---------- Импорт ---------- */
+
+.import-list { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }
+.import-card {
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+}
+.import-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px; height: 24px;
+  flex: none;
+  font-weight: 700;
+  border-radius: 50%;
+}
+.import-status.created, .import-status.merged, .import-status.replaced {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.import-status.error { color: var(--danger); background: rgba(255, 95, 95, .14); }
+.import-status.skipped { color: var(--muted); }
+.import-status:not(.created):not(.merged):not(.replaced):not(.error):not(.skipped) {
+  border: 2px solid var(--line-2);
+  border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+  font-size: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.unmatched { margin-top: 10px; }
+.unmatched summary { cursor: pointer; font-size: var(--fs-small); color: var(--accent); }
+.unmatched-row { padding: 4px 0; }
+.unmatched-row select { min-width: 0; flex: 1; }
+
+/* ---------- Выпадающий список плейлистов ---------- */
+
+.menu-anchor { position: relative; display: inline-flex; }
+
+.playlist-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  width: min(78vw, 280px);
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .6);
+  z-index: 40;
+  overflow: hidden;
+}
+.playlist-pop-search {
+  margin: 8px;
+  min-width: 0;
+  padding: 9px 12px;
+  font-size: 14px;
+}
+.playlist-pop-list {
+  overflow-y: auto;
+  padding: 0 6px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.playlist-pop-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+}
+.playlist-pop-item:hover { background: var(--hover); }
+
+/* ---------- Уведомления ---------- */
+
+.toast {
+  position: fixed;
+  right: 24px;
+  bottom: calc(var(--player-h) + 16px);
+  background: var(--panel-3);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  max-width: 380px;
+  z-index: 150;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .5);
+  font-size: 14px;
+}
+.toast.error { border-left-color: var(--danger); }
+.toast.ok { border-left-color: var(--ok); }
+
+/* ---------- Диалоги ---------- */
+
+.mtr-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .74);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  z-index: 200;
+  animation: fade-in .12s ease;
+}
+.mtr-dialog {
+  background: var(--panel-2);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  width: min(94vw, 440px);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, .65);
+}
+.mtr-dialog-title { margin: 0 0 10px; font-size: 18px; }
+.mtr-dialog-text { margin: 0 0 18px; color: var(--muted); font-size: 14px; line-height: 1.55; }
+.mtr-dialog-input { width: 100%; margin-bottom: 18px; min-width: 0; }
+.mtr-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+@keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+
+/* ---------- Логин ---------- */
+
+.login-body {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 20px;
+  background: var(--bg);
+}
+.login-card {
+  background: var(--panel);
+  border-radius: 18px;
+  padding: 36px 32px;
+  width: min(94vw, 384px);
+  text-align: center;
+}
+.login-logo { border-radius: 14px; margin-bottom: 14px; }
+.login-card h1 { font-size: 20px; letter-spacing: .16em; }
+#login-form { display: flex; flex-direction: column; gap: 8px; margin-top: 22px; text-align: left; }
+#login-form label { font-size: var(--fs-small); color: var(--muted); }
+#login-form input { width: 100%; }
+#login-form button { margin-top: 10px; width: 100%; }
+
+/* ---------- Плеер: три зоны ---------- */
+
+.player {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--player-h);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 2fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px 0 calc(var(--rail-w) + 8px);
+  background: var(--rail);
+  border-top: 1px solid var(--line);
+  z-index: 30;
+}
+.player[hidden] { display: none; }
+
+.player-track {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.cover-now {
+  width: 52px;
+  height: 52px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--panel-2);
+  flex: none;
+}
+.player-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.player-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.player-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+.controls { display: flex; align-items: center; gap: 6px; }
+.play-btn {
+  background: var(--accent);
+  color: var(--accent-ink);
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border-radius: 50%;
+}
+.play-btn:hover { background: var(--accent-dark); }
+.play-btn .icon { width: 20px; height: 20px; filter: none; opacity: 1; }
+
+.player-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+#seek {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--accent);
+  height: 16px;
+}
+#seek:focus { outline: none; }
+
+.player-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+/* Сердце скрыто, пока ничего не играет: правило hidden важнее display. */
+.player-right #now-heart[hidden] { display: none; }
+
+/* ---------- Адаптив ---------- */
+
+@media (max-width: 1100px) {
+  .view { width: 94%; }
+  .album-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+}
+
+@media (max-width: 900px) {
+  :root { --rail-w: 64px; --player-h: 200px; --player-gap: 24px; }
+  .rail-btn { width: 42px; height: 42px; }
+  .two-col { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: 1fr; gap: 4px 0; }
+  .kv > span:nth-child(odd) { margin-top: 10px; }
+  .album-hero { grid-template-columns: 1fr; }
+  .album-hero-title { font-size: 26px; }
+  .player {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+    height: auto;
+    min-height: var(--player-h);
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom)) 14px;
+    gap: 8px;
+  }
+  .player-track { justify-content: center; }
+  .player-right { justify-content: center; }
+  .toast { right: 12px; left: 12px; max-width: none; }
+}
+
+@media (max-width: 760px) {
+  /* 100vw на телефоне может быть шире видимой области (полоса прокрутки,
+     подгонка масштаба), из-за этого появлялся горизонтальный скролл на 3px.
+     Здесь ширина от контейнера, а не от окна. */
+  .view { width: auto; max-width: none; margin: 0; padding: 4px 12px 40px; }
+}
+
+@media (max-width: 700px) {
+  .view { padding-left: 12px; padding-right: 12px; }
+  .form-grid { grid-template-columns: 1fr; }
+  .artist-grid { grid-auto-columns: minmax(96px, 1fr); gap: 14px; }
+  .album-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 12px; }
+  .setting { flex-wrap: wrap; }
+  .setting-control { width: 100%; }
+  .setting-control input, .setting-control select { width: 100%; }
+  .mtr-dialog { padding: 20px; }
+  .row { flex-wrap: wrap; }
+}
+
+@media (max-width: 480px) {
+  .hide-sm { display: none; }
+  .artist-avatar { font-size: 22px; }
+  .album-hero-title { font-size: 22px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}

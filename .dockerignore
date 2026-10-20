@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Тесты и dev-зависимости не нужны в рантайме
+tests/
+requirements-dev.txt
+pytest.ini
+
+# Данные и артефакты — никогда не в образ
+*.db
+*.db-wal
+*.db-shm
+*.tar.gz
+*.log
+.env
+
+.git/
+.gitignore
+Dockerfile
+docker-compose.yml

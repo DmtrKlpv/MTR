@@ -1,0 +1,5 @@
+# Тестовое окружение. В Docker-образ НЕ попадает (см. .dockerignore/Dockerfile).
+-r requirements.txt
+pytest==9.0.1
+pytest-asyncio==1.4.0
+httpx==0.28.1

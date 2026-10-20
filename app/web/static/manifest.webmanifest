@@ -1,0 +1,14 @@
+{
+  "name": "MTR Music Server",
+  "short_name": "MTR",
+  "description": "Собственный музыкальный сервер",
+  "start_url": "/app",
+  "display": "standalone",
+  "background_color": "#101014",
+  "theme_color": "#d7e021",
+  "icons": [
+    { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
