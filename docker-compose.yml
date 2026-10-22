@@ -1,30 +1,12 @@
-# Запуск: docker compose up -d --build
-# Перед первым стартом задайте MUSIC_PATH в .env или окружении.
 services:
   mtr:
-    build: .
     image: mtr:0.13.5
-    container_name: mtr-server
-    restart: unless-stopped
+    pull_policy: never            # образ уже загружен, не ходить в Docker Hub
+    container_name: mtr-app
+    restart: always
+    env_file: .env                # все переменные окружения берутся из .env
     ports:
-      - "4533:4533"
+      - "${MTR_PORT:-4533}:4533"
     volumes:
-      # Windows: MUSIC_PATH=M:/Music/All/Classics
-      # Linux/macOS: MUSIC_PATH=/srv/music
       - "${MUSIC_PATH:?задайте MUSIC_PATH в .env}:/music:ro"
-      - "mtr-data:/data"
-    environment:
-      MTR_SECRET_KEY: "${MTR_SECRET_KEY:?задайте MTR_SECRET_KEY в .env}"
-      # Создаст админа только на пустой базе; после входа пароль сменить.
-      MTR_ADMIN_USER: "${MTR_ADMIN_USER:-admin}"
-      MTR_ADMIN_PASSWORD: "${MTR_ADMIN_PASSWORD:-changeme123}"
-      MTR_LOG_LEVEL: "INFO"
-      # Наблюдение за библиотекой. Для Windows-томов (D:/...) обязателен POLL=1:
-      # inotify через границу гипервизора не передаётся.
-      MTR_WATCH: "${MTR_WATCH:-1}"
-      MTR_WATCH_POLL: "${MTR_WATCH_POLL:-1}"
-      MTR_WATCH_POLL_MS: "${MTR_WATCH_POLL_MS:-1000}"
-      MTR_SCAN_INTERVAL: "${MTR_SCAN_INTERVAL:-300}"
-
-volumes:
-  mtr-data:
+      - "${DATA_PATH:?задайте DATA_PATH в .env}:/data"
