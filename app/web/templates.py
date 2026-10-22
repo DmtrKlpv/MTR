@@ -168,9 +168,52 @@ APP_HTML = f"""<!DOCTYPE html>
 """
 
 
+SETUP_HTML = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+{HEAD_COMMON}
+<title>Первый запуск — MTR</title>
+</head>
+<body class="login-body">
+<main class="login-card">
+  <img class="login-logo" src="/static/icon.svg" alt="" width="56" height="56">
+  <h1>MTR</h1>
+  <p class="muted">Первый запуск: создайте администратора</p>
+  <form id="setup-form" autocomplete="on">
+    <label for="username">Имя пользователя</label>
+    <input id="username" name="username" autocomplete="username"
+           value="admin" required autofocus>
+    <label for="password">Пароль</label>
+    <input id="password" name="password" type="password"
+           autocomplete="new-password" minlength="8" required>
+    <label for="password2">Пароль ещё раз</label>
+    <input id="password2" name="password2" type="password"
+           autocomplete="new-password" minlength="8" required>
+    <div id="setup-error" class="error" role="alert" hidden></div>
+    <button type="submit" id="setup-submit" class="primary">Создать и войти</button>
+  </form>
+  <p class="muted small" style="margin-top:14px">
+    Пароль хранится только в базе, в виде хеша. В файлах конфигурации его нет.
+  </p>
+</main>
+<script src="/static/setup.js"></script>
+</body>
+</html>
+"""
+
+
 def render_login(error: str | None = None) -> str:
     """Логин-страница. Ошибку показывает JS, но можно передать сразу."""
     return LOGIN_HTML
+
+
+def render_setup() -> str:
+    """Страница первого запуска: создание администратора.
+
+    Нужна, чтобы не держать пароль в файлах: пока в базе нет ни одной учётной
+    записи, вход открывает именно эта форма.
+    """
+    return SETUP_HTML
 
 
 def render_app(username: str, role: str, csrf: str) -> str:

@@ -1057,27 +1057,28 @@ async def get_settings(
 
 
 def _readonly_settings(ctx: AppContext) -> list[dict[str, Any]]:
-    """Параметры запуска, меняющиеся только через .env и перезапуск."""
+    """Только для чтения: что задаётся при создании контейнера.
+
+    Эти значения нельзя менять из интерфейса, потому что они определяют, куда
+    смонтированы тома, — их задаёт `docker compose` в `docker-compose.yml`.
+    Показываем их здесь, чтобы всё было видно в одном месте.
+    """
     settings = ctx.settings
     return [
         {"key": "MUSIC_DIR", "label": "Каталог музыки",
          "value": str(settings.music_dir),
-         "help": "Куда смонтирована библиотека (MUSIC_PATH в docker-compose)."},
+         "help": "Куда смонтирована библиотека. Задаётся в docker-compose.yml."},
         {"key": "DATA_DIR", "label": "Каталог состояния",
          "value": str(settings.data_dir),
-         "help": "Базы, ключ шифрования и кэш обложек (DATA_PATH)."},
-        {"key": "MTR_PORT", "label": "Порт",
-         "value": "4533", "help": "Внутри контейнера порт всегда 4533 (MTR_PORT)."},
+         "help": "Базы, ключ шифрования и кэш обложек. Задаётся в docker-compose.yml."},
         {"key": "MTR_SECRET_KEY", "label": "Ключ шифрования",
          "value": ("из файла " + str(settings.secret_key_file))
-                  if settings.secret_key is None else "задан в .env",
-         "help": "Смена ключа делает сохранённые пароли нечитаемыми."},
-        {"key": "MTR_ADMIN_USER", "label": "Стартовый администратор",
-         "value": "создаётся только на пустой базе",
-         "help": "Дальше учётные записи ведутся на странице «Пользователи»."},
-        {"key": "MTR_LOG_LEVEL", "label": "Уровень логов (.env)",
-         "value": settings.log_level,
-         "help": "Переопределяется одноимённой настройкой выше."},
+                  if settings.secret_key is None else "задан переменной окружения",
+         "help": "Создаётся автоматически при первом старте и лежит в томе /data. "
+                 "Смена ключа делает сохранённые пароли нечитаемыми."},
+        {"key": "users", "label": "Учётные записи",
+         "value": "ведутся на странице «Пользователи»",
+         "help": "Пароли хранятся хешем в базе, в файлах конфигурации их нет."},
     ]
 
 
