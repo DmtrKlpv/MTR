@@ -1,6 +1,6 @@
 services:
   mtr:
-    image: mtr:0.13.5
+    image: mtr:0135
     pull_policy: never            # образ уже загружен, не ходить в Docker Hub
     container_name: mtr-app
     restart: always
@@ -10,3 +10,4 @@ services:
     volumes:
       - "${MUSIC_PATH:?задайте MUSIC_PATH в .env}:/music:ro"
       - "${DATA_PATH:?задайте DATA_PATH в .env}:/data"
+
