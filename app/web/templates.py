@@ -124,7 +124,7 @@ APP_HTML = f"""<!DOCTYPE html>
   </nav>
 
   <main id="view" class="view">
-    <p class="muted">Загрузка…</p>
+    <p class="muted">Загрузка / Обновление базы ...</p>
   </main>
 
   <footer class="player" id="player" hidden>
