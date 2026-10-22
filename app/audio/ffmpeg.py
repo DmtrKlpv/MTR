@@ -54,6 +54,16 @@ class TranscodeLimiter:
     def limit(self) -> int:
         return self._limit
 
+    def resize(self, limit: int) -> None:
+        """Меняет лимит на лету (настройка «Лимит транскодов»).
+
+        Уже запущенные потоки не прерываются: новый лимит влияет только на
+        следующие запросы. Если лимит подняли, свободные слоты появятся сразу.
+        """
+        if limit < 1:
+            raise ValueError("лимит транскодов должен быть >= 1")
+        self._limit = int(limit)
+
     def try_acquire(self) -> bool:
         if self._active >= self._limit:
             return False

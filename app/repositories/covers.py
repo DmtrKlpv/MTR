@@ -14,14 +14,49 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections import OrderedDict
 from pathlib import Path
 
-from app.covers.service import CoverData, CoverResolver, extract_cover
+from app.covers.service import (
+    CoverData,
+    CoverResolver,
+    extract_cover,
+    extract_from_directory,
+)
 from app.db.database import Database
 from app.utils.timeutil import utcnow_iso
 
 logger = logging.getLogger(__name__)
+
+# Сколько обложек извлекать одновременно. Извлечение — это чтение файла и
+# разбор тегов: на слабом ARM десяток параллельных чтений уже насыщает диск,
+# а браузер запрашивает картинки пачками по 6 штук на соединение.
+COVER_EXTRACT_CONCURRENCY = 2
+
+# Сколько ключей помнить как «обложки нет». Без этого повторный заход в каталог
+# заново перечитывал бы десятки файлов на каждый альбом без картинки.
+NEGATIVE_CACHE_LIMIT = 20000
+
+
+def _search_cover_files(
+    paths: list[Path], with_cover: list[Path]
+) -> CoverData | None:
+    """Ищет обложку среди файлов альбома. Выполняется в рабочем потоке.
+
+    Сначала картинка-файл в каталоге (одно чтение каталога), затем встроенные
+    обложки — только у треков, где это обещает флаг has_cover.
+    """
+    if paths:
+        cover = extract_from_directory(paths[0])
+        if cover is not None:
+            return cover
+    for path in with_cover:
+        cover = extract_cover(path)
+        if cover is not None:
+            return cover
+    return None
 
 
 class CoverRepository:
@@ -30,18 +65,49 @@ class CoverRepository:
     def __init__(self, db: Database, resolver: CoverResolver) -> None:
         self._db = db
         self._resolver = resolver
+        # Ограничитель именно для извлечения: чтение с диска не должно
+        # занимать event loop и не должно идти сотнями потоков.
+        self._semaphore = asyncio.Semaphore(COVER_EXTRACT_CONCURRENCY)
+        # Отрицательный кеш: ключ -> True. Храним в памяти процесса.
+        self._missing: OrderedDict[str, None] = OrderedDict()
 
     # ------------------------------------------------------------------
     # Чтение
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Отрицательный кеш
+    # ------------------------------------------------------------------
+    def _remember_missing(self, key: str) -> None:
+        """Запоминает, что обложки у сущности нет.
+
+        Без этого каждый заход в каталог заново перечитывал бы все файлы
+        альбома в поисках картинки, которой там нет. Сбрасывается при
+        изменении тегов и при очистке кеша.
+        """
+        self._missing[key] = None
+        self._missing.move_to_end(key)
+        while len(self._missing) > NEGATIVE_CACHE_LIMIT:
+            self._missing.popitem(last=False)
+
+    def _is_known_missing(self, key: str) -> bool:
+        return key in self._missing
+
+    def forget_missing(self) -> None:
+        """Сбрасывает отрицательный кеш (после скана или очистки обложек)."""
+        self._missing.clear()
+
     async def get_cached(self, key: str) -> CoverData | None:
-        """Возвращает обложку из кэша, если файл ещё на месте."""
+        """Возвращает обложку из кеша, если файл ещё на месте."""
         row = await self._db.fetch_one(
             "SELECT file_path, mime_type FROM cover_cache WHERE key = ?", (key,)
         )
         if row is None:
             return None
-        cover = self._resolver.read_cached(str(row["file_path"]))
+        # Чтение файла блокирует поток: уводим в рабочий, иначе на медленном
+        # томе встаёт весь event loop и интерфейс перестаёт отвечать.
+        cover = await asyncio.to_thread(
+            self._resolver.read_cached, str(row["file_path"])
+        )
         if cover is None:
             # Файл пропал (например, почистили volume) — запись устарела.
             await self._db.execute("DELETE FROM cover_cache WHERE key = ?", (key,))
@@ -51,7 +117,11 @@ class CoverRepository:
 
     async def store(self, key: str, cover: CoverData) -> None:
         """Сохраняет обложку и запись кэша (upsert по ключу)."""
-        file_path, size = self._resolver.store(key, cover)
+        # Запись на диск тоже блокирующая.
+        file_path, size = await asyncio.to_thread(
+            self._resolver.store, key, cover
+        )
+        self._missing.pop(key, None)
         await self._db.execute(
             "INSERT INTO cover_cache "
             "(key, file_path, mime_type, size_bytes, source, created_at) "
@@ -69,11 +139,19 @@ class CoverRepository:
     # Разрешение для альбома
     # ------------------------------------------------------------------
     async def for_album(self, album_id: int) -> CoverData | None:
-        """Обложка альбома: кэш, затем обложки его треков."""
+        """Обложка альбома: кеш, затем файл в каталоге, затем встроенные.
+
+        Порядок выбран по стоимости: `cover.jpg` рядом с треками находится
+        одним чтением каталога, а разбор тегов — это открытие и парсинг
+        каждого файла. Поэтому встроенные обложки ищутся вторыми и только у
+        треков, где их наличие подтверждает has_cover.
+        """
         key = f"al-{album_id}"
         cached = await self.get_cached(key)
         if cached is not None:
             return cached
+        if self._is_known_missing(key):
+            return None
 
         rows = await self._db.fetch_all(
             "SELECT path, has_cover FROM tracks "
@@ -82,19 +160,32 @@ class CoverRepository:
             (album_id,),
         )
         if not rows:
+            self._remember_missing(key)
             return None
 
-        for row in rows:
-            path = Path(str(row["path"]))
-            if not self._resolver.is_inside_music(path):
-                continue
-            cover = extract_cover(path)
-            if cover is None:
-                continue
-            await self.store(key, cover)
-            logger.debug("обложка альбома %d из %s (%s)", album_id, path, cover.source)
-            return cover
-        return None
+        paths = [
+            Path(str(row["path"])) for row in rows
+            if self._resolver.is_inside_music(Path(str(row["path"])))
+        ]
+        with_cover = [
+            Path(str(row["path"])) for row in rows
+            if int(row["has_cover"] or 0)
+            and self._resolver.is_inside_music(Path(str(row["path"])))
+        ]
+
+        # Извлечение — блокирующее чтение файлов: рабочий поток плюс
+        # ограничитель, чтобы десятки параллельных запросов не забили диск.
+        async with self._semaphore:
+            cover = await asyncio.to_thread(
+                _search_cover_files, paths, with_cover
+            )
+
+        if cover is None:
+            self._remember_missing(key)
+            return None
+        await self.store(key, cover)
+        logger.debug("обложка альбома %d (%s)", album_id, cover.source)
+        return cover
 
     async def for_track(self, track_id: int) -> CoverData | None:
         """Обложка конкретного трека (для `tr-<id>`)."""
@@ -114,7 +205,10 @@ class CoverRepository:
         if not self._resolver.is_inside_music(path):
             return None
 
-        cover = extract_cover(path)
+        cover = None
+        if not self._is_known_missing(key):
+            async with self._semaphore:
+                cover = await asyncio.to_thread(extract_cover, path)
         if cover is None:
             # У трека своей картинки нет — отдаём обложку альбома,
             # но НЕ кэшируем под ключом трека: иначе при появлении
@@ -129,9 +223,9 @@ class CoverRepository:
 
     async def invalidate_album(self, album_id: int) -> None:
         """Сбрасывает кэш альбома (вызывается при изменении тегов)."""
-        await self._db.execute(
-            "DELETE FROM cover_cache WHERE key = ?", (f"al-{album_id}",)
-        )
+        key = f"al-{album_id}"
+        self._missing.pop(key, None)
+        await self._db.execute("DELETE FROM cover_cache WHERE key = ?", (key,))
 
     async def stats(self) -> dict[str, int]:
         """Сколько обложек в кэше и сколько занимают."""

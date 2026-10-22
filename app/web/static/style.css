@@ -847,6 +847,7 @@ input[type="search"] { -webkit-appearance: none; appearance: none; }
 .badge.status-completed { background: rgba(74, 222, 128, .14); color: var(--ok); }
 .badge.status-failed { background: rgba(255, 95, 95, .14); color: var(--danger); }
 .badge.status-running { background: var(--accent-soft); color: var(--accent); }
+.badge.danger { background: rgba(255, 95, 95, .14); color: var(--danger); }
 
 .kv {
   display: grid;
@@ -1198,4 +1199,76 @@ label.inline {
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
+}
+
+
+/* Панель статуса сканирования на главной: пока идёт индексация,
+   основной интерфейс показать нечего, поэтому вместо «Загрузка…»
+   выводим прогресс, счётчики и последние ошибки. */
+.scan-status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap, 12px);
+  margin: var(--gap, 12px) 0;
+}
+.scan-status .kv {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: 4px 12px;
+}
+/* Раскрывающийся список ошибок: в закрытом виде одна строка «ошибок N». */
+/* Таблица ошибок скана: файл и причина, видно сразу, без раскрытия.
+   Прокрутка ограничена: при массовом сбое строк бывают сотни. */
+.error-table-wrap {
+  margin: 8px 0 4px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.error-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.error-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.error-table th:first-child { width: 55%; }
+.error-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.error-table tr:last-child td { border-bottom: 0; }
+/* Путь может быть очень длинным: переносим по любому месту, иначе
+   таблица расползается по горизонтали. */
+.error-table .path-cell {
+  word-break: break-all;
+  color: var(--muted, inherit);
+}
+
+/* Шапка записи истории скана: счётчики одной строкой, ошибки — под ней. */
+.scan-run-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.scan-errors-live:empty { display: none; }
+
+/* Догрузка списков: строка «показано N из M» и кнопка. */
+.pagination {
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0 4px;
 }

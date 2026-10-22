@@ -199,21 +199,36 @@ class LibraryRepository:
     # ------------------------------------------------------------------
     # Исполнители
     # ------------------------------------------------------------------
-    async def list_artists(self) -> list[ArtistRow]:
-        """Все исполнители хотя бы с одним непустым альбомом."""
-        rows = await self._db.fetch_all(
-            """
+    async def list_artists(
+        self, *, limit: int | None = None, offset: int = 0
+    ) -> list[ArtistRow]:
+        """Исполнители хотя бы с одним непустым альбомом.
+
+        Список отдаётся страницами: у реальной библиотеки исполнителей тысячи,
+        и рисовать их все одним куском — это и запрос на тысячи строк, и
+        столько же узлов в DOM.
+        """
+        sql = """
             SELECT ar.id, ar.name,
                    (SELECT COUNT(*) FROM albums a
                      WHERE a.artist_id = ar.id
-                       AND (SELECT COUNT(*) FROM tracks t
-                             WHERE t.album_id = a.id AND t.missing = 0) > 0)
+                       AND EXISTS (SELECT 1 FROM tracks t
+                                    WHERE t.album_id = a.id
+                                      AND t.missing = 0))
                    AS album_count
               FROM artists ar
+             WHERE EXISTS (SELECT 1 FROM albums a
+                            JOIN tracks t ON t.album_id = a.id
+                           WHERE a.artist_id = ar.id
+                             AND t.missing = 0)
              ORDER BY ar.name COLLATE NOCASE
-            """
-        )
-        artists = [
+        """
+        params: list[object] = []
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params = [max(1, min(int(limit), 500)), max(0, int(offset))]
+        rows = await self._db.fetch_all(sql, tuple(params))
+        return [
             ArtistRow(
                 id=int(row["id"]),
                 name=str(row["name"]),
@@ -221,9 +236,48 @@ class LibraryRepository:
             )
             for row in rows
         ]
-        # Исполнитель без альбомов (встречается только в тегах треков)
-        # клиентам бесполезен и засоряет навигацию.
-        return [artist for artist in artists if artist.album_count > 0]
+
+    async def count_artists(self) -> int:
+        """Исполнители с хотя бы одним треком — для пагинации списка."""
+        return int(
+            await self._db.fetch_value(
+                """
+                SELECT COUNT(*) FROM artists ar
+                 WHERE EXISTS (SELECT 1 FROM albums a
+                                JOIN tracks t ON t.album_id = a.id
+                               WHERE a.artist_id = ar.id
+                                 AND t.missing = 0)
+                """,
+                default=0,
+            )
+            or 0
+        )
+
+    async def artist_album_map(self, artist_ids: list[int]) -> dict[int, int]:
+        """id первого непустого альбома для каждого исполнителя — одним запросом.
+
+        Раньше на каждого исполнителя делался отдельный запрос (first_album_id),
+        и на 5000 исполнителей это были 5000 обращений в SQLite подряд.
+        """
+        if not artist_ids:
+            return {}
+        placeholders = ",".join("?" for _ in artist_ids)
+        rows = await self._db.fetch_all(
+            f"""
+            SELECT a.artist_id AS artist_id, MIN(a.id) AS album_id
+              FROM albums a
+             WHERE a.artist_id IN ({placeholders})
+               AND EXISTS (SELECT 1 FROM tracks t
+                            WHERE t.album_id = a.id AND t.missing = 0)
+             GROUP BY a.artist_id
+            """,
+            tuple(artist_ids),
+        )
+        return {
+            int(row["artist_id"]): int(row["album_id"])
+            for row in rows
+            if row["album_id"] is not None
+        }
 
     async def get_artist(self, artist_id: int) -> ArtistRow | None:
         row = await self._db.fetch_one(

@@ -20,6 +20,9 @@ from app.utils.timeutil import utcnow_iso
 
 logger = logging.getLogger(__name__)
 
+# Сколько последних ошибок держать в памяти для панели прогресса.
+MAX_RECENT_ERRORS = 20
+
 
 @dataclass(slots=True)
 class ScanState:
@@ -42,6 +45,9 @@ class ScanState:
     removed: int = 0
     failed: int = 0
     error: str | None = None
+    # Последние ошибки по файлам: панель показывает их без похода в БД.
+    # Каждая запись — {"path": ..., "reason": ...}.
+    recent_errors: list[dict] = field(default_factory=list)
 
     # Защита от одновременного запуска: сравнение и установка статуса
     # идут под локом, иначе две вкладки стартуют два скана.
@@ -76,6 +82,7 @@ class ScanState:
             "removed": self.removed,
             "failed": self.failed,
             "error": self.error,
+            "recent_errors": list(self.recent_errors),
         }
 
     # ------------------------------------------------------------------
@@ -96,6 +103,7 @@ class ScanState:
             self.added = self.updated = self.unchanged = 0
             self.removed = self.failed = 0
             self.error = None
+            self.recent_errors.clear()
             return True
 
     def update(self, event: dict) -> None:
@@ -121,6 +129,16 @@ class ScanState:
         for key in ("added", "updated", "unchanged", "removed", "failed"):
             if key in event:
                 setattr(self, key, int(event[key] or 0))
+        last_error = event.get("last_error")
+        if isinstance(last_error, dict) and last_error.get("path"):
+            item = {
+                "path": str(last_error.get("path") or ""),
+                "reason": str(last_error.get("reason") or ""),
+            }
+            # Храним хвост, а не всё: полный список всё равно уходит в историю.
+            if not self.recent_errors or self.recent_errors[-1] != item:
+                self.recent_errors.append(item)
+                del self.recent_errors[:-MAX_RECENT_ERRORS]
 
     async def finish(self, *, status: str, error: str | None = None) -> None:
         async with self._lock:

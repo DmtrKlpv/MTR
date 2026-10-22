@@ -22,8 +22,11 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_DIR = Path(__file__).resolve().parent
 
-# Текущая целевая версия схемы для обеих баз.
+# Текущая целевая версия схемы mtr_users.db.
 SCHEMA_VERSION = 2
+# У музыкальной базы своя версия: она меняется чаще, и поднимать из-за этого
+# версию пользовательской базы (с паролями и сессиями) незачем.
+MUSIC_SCHEMA_VERSION = 3
 
 # v2: сессии веб-интерфейса. В v1 таблица sessions уже есть, но хранит
 # открытый id и не умеет CSRF. Миграция перестраивает её:
@@ -47,6 +50,15 @@ CREATE TABLE sessions (
 );
 CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions (user_id);
 CREATE INDEX IF NOT EXISTS ix_sessions_expires ON sessions (expires_at);
+"""
+
+# v3 (только mtr_music.db): тексты ошибок сканирования.
+# Раньше в scan_runs попадали только счётчики, поэтому «ошибок 1» в интерфейсе
+# нельзя было раскрыть до конкретного файла. Теперь храним и текст.
+# errors_json — список строк, ограниченный при записи (см. TrackRepository).
+MIGRATION_MUSIC_V3_ERRORS = """
+ALTER TABLE scan_runs ADD COLUMN errors_total INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE scan_runs ADD COLUMN errors_json TEXT;
 """
 
 
@@ -83,23 +95,28 @@ async def _migrate_users(db: Database) -> None:
 
 
 async def _migrate_music(db: Database) -> None:
-    """Приводит mtr_music.db к SCHEMA_VERSION."""
+    """Приводит mtr_music.db к MUSIC_SCHEMA_VERSION."""
     current = await db.get_user_version()
-    if current > SCHEMA_VERSION:
+    if current > MUSIC_SCHEMA_VERSION:
         raise DatabaseError(
             f"mtr_music.db имеет версию схемы {current}, а код поддерживает "
-            f"только {SCHEMA_VERSION}. База создана более новой версией."
+            f"только {MUSIC_SCHEMA_VERSION}. База создана более новой версией."
         )
-    if current == SCHEMA_VERSION and current != 0:
+    if current == MUSIC_SCHEMA_VERSION and current != 0:
         logger.debug("mtr_music.db уже на версии %d", current)
         return
 
+    # Ветки именно elif: свежая база получает нужные колонки из schema_music.sql,
+    # и повторный ALTER упал бы с «duplicate column name».
     if current < 1:
-        logger.info("mtr_music.db: применяю базовую схему (v1)")
+        logger.info("mtr_music.db: применяю базовую схему (v3)")
         await db.executescript(_read_schema("schema_music.sql"))
+    elif current < 3:
+        logger.info("mtr_music.db: применяю миграцию v3 (ошибки сканирования)")
+        await db.executescript(MIGRATION_MUSIC_V3_ERRORS)
 
-    await db.set_user_version(SCHEMA_VERSION)
-    logger.info("mtr_music.db готова, версия схемы %d", SCHEMA_VERSION)
+    await db.set_user_version(MUSIC_SCHEMA_VERSION)
+    logger.info("mtr_music.db готова, версия схемы %d", MUSIC_SCHEMA_VERSION)
 
 
 async def init_databases(users_db: Database, music_db: Database) -> None:

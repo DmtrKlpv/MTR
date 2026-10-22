@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import json
+
 import logging
 from pathlib import Path
 from typing import Any
@@ -22,7 +24,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from app.bootstrap import AppContext
+from app.bootstrap import AppContext, apply_runtime_settings
 from app.repositories.playlists import PlaylistError, PlaylistRepository
 from app.repositories.users import UserError
 from app.utils.timeutil import utcnow_iso
@@ -37,6 +39,52 @@ from app.web.sessions import SessionRecord
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/web", tags=["web"])
+
+
+def _scan_error_fields(row) -> dict[str, Any]:
+    """Поля ошибок скана для JSON: полное число и сохранённые тексты."""
+    total, items = _scan_errors(row)
+    return {"errors_total": total, "errors": items}
+
+
+def _scan_errors(row) -> tuple[int, list[dict[str, str]]]:
+    """Возвращает (полное число ошибок, записи «файл / причина»).
+
+    errors_total и errors_json появились в схеме v3. Если счётчика нет,
+    считаем по files_failed — старые записи истории не должны врать. Записи
+    до v3.1 хранили склеенную строку «путь: причина», поэтому понимаем оба
+    формата: разбирать старую строку лучше здесь, чем в интерфейсе.
+    """
+    keys = row.keys()
+    total = int(row["errors_total"] or 0) if "errors_total" in keys else 0
+    if not total:
+        total = int(row["files_failed"] or 0)
+    raw = row["errors_json"] if "errors_json" in keys else None
+    if not raw:
+        return total, []
+    try:
+        items = json.loads(raw)
+    except (TypeError, ValueError):
+        return total, []
+    if not isinstance(items, list):
+        return total, []
+
+    result: list[dict[str, str]] = []
+    for item in items:
+        if isinstance(item, dict):
+            result.append({
+                "path": str(item.get("path") or ""),
+                "reason": str(item.get("reason") or ""),
+            })
+        else:
+            text = str(item)
+            # Старый формат: «/music/a.mp3: FLACNoHeaderError: ...».
+            path, sep, reason = text.partition(": ")
+            if sep:
+                result.append({"path": path, "reason": reason})
+            else:
+                result.append({"path": text, "reason": ""})
+    return total, result
 
 
 def _ok(payload: Any = None, *, status_code: int = 200) -> JSONResponse:
@@ -149,7 +197,12 @@ async def albums(
                     "song_count": album.song_count,
                 }
                 for album in rows
-            ]
+            ],
+            # Сколько всего: нужно, чтобы интерфейс знал, есть ли следующая
+            # страница, и не тянул сразу все 9000 альбомов.
+            "total": await ctx.library.count_albums(),
+            "limit": limit,
+            "offset": offset,
         }
     )
 
@@ -342,6 +395,7 @@ async def scan_status(
             "removed": int(row["files_removed"] or 0),
             "failed": int(row["files_failed"] or 0),
             "error": row["error"],
+            **_scan_error_fields(row),
         }
     return _ok(payload)
 
@@ -370,6 +424,7 @@ async def scan_history(
                 "removed": int(row["files_removed"] or 0),
                 "failed": int(row["files_failed"] or 0),
                 "error": row["error"],
+                **_scan_error_fields(row),
             }
             for row in rows
         ]
@@ -655,6 +710,9 @@ async def server_info(
             "music_dir_exists": settings.music_dir.exists(),
             "music_db": str(settings.music_db),
             "users_db": str(settings.users_db),
+            "data_dir": str(settings.data_dir),
+            "secret_from_file": settings.secret_key is None,
+            "secret_file": str(settings.secret_key_file),
             "schema": {
                 "users": await ctx.users_db.get_user_version(),
                 "music": await ctx.music_db.get_user_version(),
@@ -663,6 +721,10 @@ async def server_info(
             "watch_polling": settings.watch_polling,
             "scan_interval_sec": settings.scan_interval_sec,
             "max_transcodes": settings.max_transcodes,
+            "scan_concurrency": settings.scan_concurrency,
+            "log_level": settings.log_level,
+            "cookie_secure": settings.cookie_secure,
+            "subsonic_api_version": settings.subsonic_api_version,
             "tracks": library.get("tracks", 0),
             "missing": library.get("missing", 0),
             "covers": covers,
@@ -694,6 +756,9 @@ async def purge_covers(
         except OSError:
             continue
     await ctx.music_db.execute("DELETE FROM cover_cache")
+    # Отрицательный кеш держится в памяти: после очистки обложки должны
+    # искаться заново, иначе отсутствие картинки запомнится навсегда.
+    ctx.covers.forget_missing()
     return _ok({"files_removed": removed, "rows": len(rows)})
 
 
@@ -920,21 +985,29 @@ async def starred_ids(
 async def list_artists(
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(current_session),
+    limit: int = Query(60, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ) -> JSONResponse:
-    rows = await ctx.library.list_artists()
-    # Пустые исполнители в списке не нужны: без альбомов открывать нечего.
+    """Исполнители страницей. Пустые (без альбомов) отфильтрованы в SQL."""
+    rows = await ctx.library.list_artists(limit=limit, offset=offset)
+    # Обложки исполнителей в схеме нет, аватар берёт картинку первого
+    # альбома. Раньше это был отдельный запрос на каждого исполнителя —
+    # на 5000 записей выходило 5000 обращений; теперь один запрос на страницу.
+    album_map = await ctx.library.artist_album_map([artist.id for artist in rows])
     return _ok(
         {
             "items": [
-                {"id": artist.id, "name": artist.name,
-                 "album_count": artist.album_count,
-                 # Обложки у исполнителя нет: аватар берёт обложку первого
-                 # альбома. id отдаём здесь, чтобы не делать запрос на
-                 # каждого исполнителя в списке.
-                 "album_id": await ctx.library.first_album_id(artist.id)}
+                {
+                    "id": artist.id,
+                    "name": artist.name,
+                    "album_count": artist.album_count,
+                    "album_id": album_map.get(artist.id),
+                }
                 for artist in rows
-                if artist.album_count > 0
-            ]
+            ],
+            "total": await ctx.library.count_artists(),
+            "limit": limit,
+            "offset": offset,
         }
     )
 
@@ -973,7 +1046,39 @@ async def get_settings(
     session: SessionRecord = Depends(require_admin),
 ) -> JSONResponse:
     """Все изменяемые настройки с описаниями — для страницы настроек."""
-    return _ok({"items": await ctx.settings_repo.describe()})
+    return _ok(
+        {
+            "items": await ctx.settings_repo.describe(),
+            # Параметры, которые нельзя менять из интерфейса. Показываем их
+            # только для чтения, чтобы всё из .env было видно в одном месте.
+            "readonly": _readonly_settings(ctx),
+        }
+    )
+
+
+def _readonly_settings(ctx: AppContext) -> list[dict[str, Any]]:
+    """Параметры запуска, меняющиеся только через .env и перезапуск."""
+    settings = ctx.settings
+    return [
+        {"key": "MUSIC_DIR", "label": "Каталог музыки",
+         "value": str(settings.music_dir),
+         "help": "Куда смонтирована библиотека (MUSIC_PATH в docker-compose)."},
+        {"key": "DATA_DIR", "label": "Каталог состояния",
+         "value": str(settings.data_dir),
+         "help": "Базы, ключ шифрования и кэш обложек (DATA_PATH)."},
+        {"key": "MTR_PORT", "label": "Порт",
+         "value": "4533", "help": "Внутри контейнера порт всегда 4533 (MTR_PORT)."},
+        {"key": "MTR_SECRET_KEY", "label": "Ключ шифрования",
+         "value": ("из файла " + str(settings.secret_key_file))
+                  if settings.secret_key is None else "задан в .env",
+         "help": "Смена ключа делает сохранённые пароли нечитаемыми."},
+        {"key": "MTR_ADMIN_USER", "label": "Стартовый администратор",
+         "value": "создаётся только на пустой базе",
+         "help": "Дальше учётные записи ведутся на странице «Пользователи»."},
+        {"key": "MTR_LOG_LEVEL", "label": "Уровень логов (.env)",
+         "value": settings.log_level,
+         "help": "Переопределяется одноимённой настройкой выше."},
+    ]
 
 
 @router.post("/settings")
@@ -1035,11 +1140,26 @@ async def reset_setting(
 
 
 async def _refresh_runtime_settings(ctx: AppContext) -> None:
-    """Подхватывает настройки, которые можно менять на лету."""
-    effective = await ctx.settings_repo.effective()
+    """Подхватывает настройки, которые можно менять без перезапуска.
+
+    Ключи с restart=True (уровень логов, cookie_secure, режим опроса) здесь
+    намеренно не применяются: они читаются только при старте.
+    """
+    # Переносим переопределения в ctx.settings: формат отдачи и лимит
+    # транскодов читаются из него в момент запроса.
+    await apply_runtime_settings(ctx)
+
+    overrides = await ctx.settings_repo.all_overrides()
+    interval = int(overrides.get("scan_interval_sec", ctx.settings.scan_interval_sec) or 0)
+    watch = bool(overrides.get("watch_enabled", ctx.settings.watch_enabled))
     if ctx.watcher is not None:
-        interval = int(effective.get("scan_interval_sec", 0) or 0)
         ctx.watcher.set_interval(interval)
+        # Наблюдатель создаётся всегда, но фоновые задачи до этого могли не
+        # стартовать (при первом запуске оба параметра были выключены).
+        if watch or interval > 0:
+            await ctx.watcher.start()
+        else:
+            await ctx.watcher.stop()
 
 
 # ----------------------------------------------------------------------

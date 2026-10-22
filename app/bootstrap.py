@@ -83,7 +83,10 @@ class AppContext:
         stream_service = StreamService(tracks_repo, limiter)
         scan_state = ScanState()
         scanner = Scanner(
-            tracks_repo, settings.music_dir, on_progress=scan_state.update
+            tracks_repo,
+            settings.music_dir,
+            on_progress=scan_state.update,
+            parse_concurrency=settings.scan_concurrency,
         )
 
         watcher = LibraryWatcher(
@@ -92,7 +95,13 @@ class AppContext:
             force_polling=settings.watch_polling,
             scan_interval_sec=settings.scan_interval_sec,
             poll_delay_ms=settings.watch_poll_ms,
-        ) if (settings.watch_enabled or settings.scan_interval_sec > 0) else None
+        )
+
+        # Запись, оставшаяся в статусе running после аварийной остановки,
+        # заставила бы интерфейс показывать вечный прогресс.
+        stale = await tracks_repo.close_stale_runs()
+        if stale:
+            logger.warning("закрыто незавершённых прогонов скана: %d", stale)
 
         return cls(
             settings=settings,
@@ -151,7 +160,9 @@ async def ensure_bootstrap_admin(
     )
     return True
 
-async def apply_runtime_settings(ctx: "AppContext") -> list[str]:
+async def apply_runtime_settings(
+    ctx: "AppContext", *, include_restart: bool = False
+) -> list[str]:
     """Переносит переопределения из БД в `ctx.settings`.
 
     Что применяется на лету: значения, которые читаются из `ctx.settings`
@@ -170,8 +181,13 @@ async def apply_runtime_settings(ctx: "AppContext") -> list[str]:
         return []
 
     known = {field.name for field in dataclasses.fields(ctx.settings)}
-    applied: list[str] = []
-    changes = {key: value for key, value in overrides.items()
+    # Ключи с restart=True (уровень логов, cookie_secure, режим опроса) на лету
+    # не применяются: сохранённое значение вступит в силу при следующем старте.
+    candidates = overrides if include_restart else {
+        key: value for key, value in overrides.items()
+        if key in SPECS and not SPECS[key].restart
+    }
+    changes = {key: value for key, value in candidates.items()
                if key in known and key in SPECS}
     if not changes:
         return []
@@ -182,4 +198,7 @@ async def apply_runtime_settings(ctx: "AppContext") -> list[str]:
     # Лимит транскодов живёт в объекте ограничителя, а не в settings.
     if "max_transcodes" in changes:
         ctx.stream_service.limiter.resize(changes["max_transcodes"])
+    # Параллельность разбора — состояние сканера, а не конфига.
+    if "scan_concurrency" in changes:
+        ctx.scanner.set_parse_concurrency(changes["scan_concurrency"])
     return applied

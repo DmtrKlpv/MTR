@@ -20,7 +20,11 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app import __version__
-from app.bootstrap import AppContext, ensure_bootstrap_admin
+from app.bootstrap import (
+    AppContext,
+    apply_runtime_settings,
+    ensure_bootstrap_admin,
+)
 from app.api.covers_ws import router as covers_router
 from app.web.api import router as web_api_router
 from app.web.ui import router as web_ui_router
@@ -104,7 +108,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
     await _bootstrap_admin_if_requested(ctx)
-    if ctx.watcher is not None:
+
+    # Значения, сохранённые в интерфейсе, лежат в таблице settings и главнее .env.
+    # При старте переносим их в ctx.settings целиком, включая restart-ключи.
+    applied = await apply_runtime_settings(ctx, include_restart=True)
+    if applied:
+        logger.info("применены настройки из БД: %s", ", ".join(applied))
+
+    # Уровень логов меняется только при старте: uvicorn и приложение уже
+    # настроены выше, поэтому поднимаем/опускаем корневой логгер здесь.
+    root_level = getattr(logging, str(ctx.settings.log_level).upper(), logging.INFO)
+    logging.getLogger().setLevel(root_level)
+
+    # Наблюдатель создаётся всегда (чтобы интервал можно было включить из UI),
+    # но фоновые задачи запускаем только когда он реально нужен.
+    if ctx.watcher is not None and (
+        ctx.settings.watch_enabled or ctx.settings.scan_interval_sec > 0
+    ):
         await ctx.watcher.start()
     # Проблема с ключом шифрования выглядит для клиента как код 40 —
     # показываем её в логе сразу, а не оставляем оператора гадать.

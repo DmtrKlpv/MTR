@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.db.migrations import SCHEMA_VERSION
+from app.db.migrations import MUSIC_SCHEMA_VERSION, SCHEMA_VERSION
 
 
 async def test_both_databases_migrated(ctx):
@@ -12,7 +12,7 @@ async def test_both_databases_migrated(ctx):
     assert ctx.settings.users_db.exists()
     assert ctx.settings.music_db.exists()
     assert await ctx.users_db.get_user_version() == SCHEMA_VERSION
-    assert await ctx.music_db.get_user_version() == SCHEMA_VERSION
+    assert await ctx.music_db.get_user_version() == MUSIC_SCHEMA_VERSION
 
 
 async def test_migration_is_idempotent(ctx):

@@ -15,6 +15,7 @@ import pytest
 import hashlib
 
 from app import __version__
+from app.db.migrations import MUSIC_SCHEMA_VERSION, SCHEMA_VERSION
 from app.config import Settings
 
 PASSWORD = "apipass12345"
@@ -57,7 +58,9 @@ async def test_healthz_ok(client: httpx.AsyncClient):
     body = response.json()
     assert body["status"] == "ok"
     assert body["version"] == __version__
-    assert body["schema"] == {"users": 2, "music": 2}
+    assert body["schema"] == {
+        "users": SCHEMA_VERSION, "music": MUSIC_SCHEMA_VERSION
+    }
 
 
 async def test_info_reports_paths(client: httpx.AsyncClient, settings: Settings):

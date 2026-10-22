@@ -1,6 +1,6 @@
 services:
   mtr:
-    image: mtr:0135
+    image: mtr:0150
     pull_policy: never            # образ уже загружен, не ходить в Docker Hub
     container_name: mtr-app
     restart: always

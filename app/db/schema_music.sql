@@ -185,7 +185,11 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     files_updated INTEGER NOT NULL DEFAULT 0,
     files_removed INTEGER NOT NULL DEFAULT 0,
     files_failed  INTEGER NOT NULL DEFAULT 0,
-    error         TEXT
+    error         TEXT,
+    -- Тексты ошибок по файлам (список строк в JSON, обрезается при записи).
+    -- errors_total хранит полное число, даже если в JSON попали не все.
+    errors_total  INTEGER NOT NULL DEFAULT 0,
+    errors_json   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS ix_scan_runs_started ON scan_runs (started_at DESC);

@@ -89,6 +89,10 @@ class Settings:
     scan_interval_sec: int = 0
     # Secure-флаг на cookie сессии: включать при работе за HTTPS.
     cookie_secure: bool = False
+    # Уровень логов приложения и uvicorn.
+    log_level: str = "INFO"
+    # Сколько файлов разбирать параллельно при сканировании.
+    scan_concurrency: int = 4
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -124,6 +128,8 @@ class Settings:
             watch_poll_ms=_env_int("MTR_WATCH_POLL_MS", 1000, minimum=100, maximum=60000),
             scan_interval_sec=_env_int("MTR_SCAN_INTERVAL", 0, minimum=0, maximum=86400),
             cookie_secure=_env_bool("MTR_COOKIE_SECURE", False),
+            log_level=_env_str("MTR_LOG_LEVEL", "INFO").upper(),
+            scan_concurrency=_env_int("MTR_SCAN_CONCURRENCY", 4, minimum=1, maximum=32),
         )
 
     def ensure_directories(self) -> None:

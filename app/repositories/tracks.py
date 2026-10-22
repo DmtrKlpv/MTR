@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import json
+
 import logging
 import sqlite3
 from dataclasses import dataclass, field
@@ -65,6 +67,30 @@ class UpsertOutcome:
     action: str  # "added" | "updated" | "unchanged"
 
 
+# Сколько текстов ошибок хранить в истории скана. Полное число всё равно
+# пишется в errors_total, поэтому обрезание не искажает счётчик.
+MAX_STORED_ERRORS = 500
+
+
+@dataclass(slots=True, frozen=True)
+class ScanError:
+    """Одна ошибка разбора: какой файл и почему не взят.
+
+    Интерфейс показывает это таблицей «файл / причина», поэтому причина
+    хранится отдельно от пути — склеенную строку пришлось бы разбирать
+    обратно, а текст причины может сам содержать двоеточия.
+    """
+
+    path: str
+    reason: str
+
+    def as_text(self) -> str:
+        return f"{self.path}: {self.reason}"
+
+    def as_dict(self) -> dict[str, str]:
+        return {"path": self.path, "reason": self.reason}
+
+
 @dataclass(slots=True)
 class ScanCounters:
     """Счётчики прохода сканера."""
@@ -75,7 +101,18 @@ class ScanCounters:
     unchanged: int = 0
     removed: int = 0
     failed: int = 0
-    errors: list[str] = field(default_factory=list)
+    errors: list[ScanError] = field(default_factory=list)
+
+    def add_error(self, path: str, reason: str) -> None:
+        """Регистрирует ошибку файла.
+
+        Полный список держим в памяти ограниченным: при массовом сбое (например,
+        отвалился сетевой том) счётчик ошибок уходит в десятки тысяч, и хранить
+        их все до конца прохода незачем — в историю всё равно попадает срез.
+        """
+        self.failed += 1
+        if len(self.errors) < MAX_STORED_ERRORS:
+            self.errors.append(ScanError(path=path, reason=reason))
 
 
 def _row_to_track(row: sqlite3.Row) -> TrackRow:
@@ -470,11 +507,16 @@ class TrackRepository:
         """Закрывает запись скана итогами."""
         if status not in ("completed", "failed", "cancelled"):
             raise ValueError(f"недопустимый статус скана: {status!r}")
+        # Тексты ошибок могут быть тысячами: в историю кладём первые MAX_STORED_ERRORS,
+        # а полное число храним отдельно, чтобы интерфейс не врал.
+        stored = [error.as_dict() for error in counters.errors[:MAX_STORED_ERRORS]]
+        errors_json = json.dumps(stored, ensure_ascii=False) if stored else None
         await self._db.execute(
             """
             UPDATE scan_runs SET
                 status = ?, finished_at = ?, files_seen = ?, files_added = ?,
-                files_updated = ?, files_removed = ?, files_failed = ?, error = ?
+                files_updated = ?, files_removed = ?, files_failed = ?, error = ?,
+                errors_total = ?, errors_json = ?
              WHERE id = ?
             """,
             (
@@ -486,8 +528,25 @@ class TrackRepository:
                 counters.removed,
                 counters.failed,
                 error,
+                len(counters.errors),
+                errors_json,
                 run_id,
             ),
+        )
+
+    async def close_stale_runs(self) -> int:
+        """Закрывает прогоны, оставшиеся в статусе running после падения.
+
+        Если контейнер убили во время скана, запись в scan_runs остаётся
+        running навсегда. Интерфейс по ней решает, что скан идёт, и показывает
+        прогресс, которого нет. Закрываем такие записи при старте.
+        """
+        now = utcnow_iso()
+        return await self._db.execute(
+            "UPDATE scan_runs SET status = 'failed', finished_at = ?, "
+            "error = COALESCE(error, 'прервано: сервер остановлен во время скана') "
+            "WHERE status = 'running'",
+            (now,),
         )
 
     async def library_stats(self) -> dict[str, int]:

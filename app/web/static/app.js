@@ -203,20 +203,50 @@ function coverUrl(kind, id) {
   return `/rest/getCoverArt?id=${kind}-${id}`;
 }
 
+// Обложки грузим только когда карточка подходит к экрану.
+//
+// <img loading="lazy"> экономит не всё: браузер всё равно начинает запрос
+// заранее и держит несколько соединений на хост. А каждый промах кеша на
+// сервере — это чтение файла и разбор тегов. Поэтому src выставляется
+// наблюдателем, а до этого в разметке стоит заглушка.
+const coverObserver = ('IntersectionObserver' in window)
+  ? new IntersectionObserver((entries, observer) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        const node = entry.target;
+        observer.unobserve(node);
+        const url = node.dataset.coverSrc;
+        if (url) {
+          delete node.dataset.coverSrc;
+          node.src = url;
+        }
+      });
+    }, { rootMargin: '300px 0px' })
+  : null;
+
 function coverImg(kind, id, { className = '', alt = '' } = {}) {
   // onerror подставляет заглушку: у части альбомов картинки просто нет,
   // и браузер иначе рисует битую иконку.
-  return el('img', {
+  const node = el('img', {
     class: className,
-    src: coverUrl(kind, id),
+    src: PLACEHOLDER,
     alt,
     loading: 'lazy',
+    decoding: 'async',
     onerror: (event) => {
-      const node = event.target;
-      if (node.src.endsWith(PLACEHOLDER)) return;
-      node.src = PLACEHOLDER;
+      const target = event.target;
+      if (target.src.endsWith(PLACEHOLDER)) return;
+      target.src = PLACEHOLDER;
     },
   });
+  const url = coverUrl(kind, id);
+  if (coverObserver) {
+    node.dataset.coverSrc = url;
+    coverObserver.observe(node);
+  } else {
+    node.src = url;
+  }
+  return node;
 }
 
 /* ---------- Навигация ---------- */
@@ -234,6 +264,10 @@ function setView(name) {
   const gear = document.querySelector('#menu-toggle');
   if (gear) gear.classList.toggle('active', !inRail);
   closeMenu();
+  // Панель статуса скана опрашивает сервер раз в секунду. При уходе с
+  // главной опрос нужно снять, иначе таймер живёт до перезагрузки страницы.
+  // scan_import.js грузится после app.js, поэтому проверяем наличие функции.
+  if (typeof stopHomeScan === 'function') stopHomeScan();
   const view = $('#view');
   view.replaceChildren(el('p', { class: 'muted' }, 'Загрузка…'));
   const loaders = {
@@ -277,7 +311,9 @@ function closeMenu() {
 
 /* ---------- Библиотека ---------- */
 async function renderLibrary(view) {
-  const [stats] = await Promise.all([api('/api/web/stats')]);
+  // Пока идёт скан, главная показывает подробный статус вместо «Загрузка…»:
+  // до конца индексации основному интерфейсу нечего отрисовать.
+  if (await scanGate(view)) return;
 
   const trackList = el('div', { class: 'list' });
 
@@ -306,13 +342,7 @@ async function renderLibrary(view) {
     }, 300),
   });
 
-  const summary = el('div', { class: 'cards' },
-    card('Треков', stats.tracks ?? 0),
-    card('Альбомов', stats.albums ?? 0),
-    card('Исполнителей', stats.artists ?? 0),
-    card('Пользователей', stats.users ?? 0),
-  );
-
+  const summary = el('div', { class: 'cards' });
   const switcher = el('div', { class: 'segmented', role: 'tablist' },
     ...['artists', 'albums', 'playlists'].map((kind) => el('button', {
       class: 'segment' + (state.libraryView === kind ? ' active' : ''),
@@ -325,8 +355,9 @@ async function renderLibrary(view) {
     }, { artists: 'Исполнители', albums: 'Альбомы', playlists: 'Плейлисты' }[kind])),
   );
 
+  // Каркас рисуем сразу. Раньше экран ждал /stats и только потом появлялся —
+  // на большой библиотеке это и выглядело как зависшее «Загрузка…».
   view.replaceChildren(
-    // Шапки нет: приветствие с именем — первое, что видно на главной.
     el('h1', { class: 'greeting' }, `Привет, ${state.user}!`),
     el('div', { class: 'row' }, search, rescanButton()),
     trackList,
@@ -337,16 +368,29 @@ async function renderLibrary(view) {
     el('div', { id: 'library-body' }, el('p', { class: 'muted' }, 'Загрузка…')),
   );
 
-  // Верхние секции грузим параллельно с основным списком: они не зависят
-  // друг от друга, и ждать их последовательно дольше.
+  // Дальше три независимых запроса: каждый заполняет свою часть по готовности.
+  // Медленный из них больше не задерживает остальные.
+  const body = $('#library-body');
+
+  loadStats(summary).catch(() => {});
   renderHomeSections($('#home-sections')).catch(() => {});
 
-  const body = $('#library-body');
   if (state.libraryView === 'artists') await renderArtistsInto(body);
   else if (state.libraryView === 'playlists') await renderPlaylistsInto(body);
   else await renderAlbumsInto(body);
 }
 
+// Счётчики под приветствием: отдельный запрос, чтобы не блокировать сетку.
+async function loadStats(node) {
+  if (!node) return;
+  const stats = await api('/api/web/stats');
+  fill(node,
+    card('Треков', stats.tracks ?? 0),
+    card('Альбомов', stats.albums ?? 0),
+    card('Исполнителей', stats.artists ?? 0),
+    card('Пользователей', stats.users ?? 0),
+  );
+}
 
 // Аватар исполнителя: обложка его альбома, а если её нет — инициалы
 // на акцентном фоне. Обложек у исполнителей в базе нет, поэтому берём
@@ -378,33 +422,96 @@ function artistAvatar(artist) {
   return node;
 }
 
+// Сколько карточек тянуть за раз. 9289 альбомов одним запросом — это и
+// мегабайты JSON, и столько же узлов DOM; пользователю нужны первые экраны.
+const PAGE_SIZE = 60;
+
 async function renderAlbumsInto(node) {
-  const data = await api('/api/web/albums');
-  state.albums = data.items || [];
-  if (!state.albums.length) {
-    node.replaceChildren(el('p', { class: 'muted' },
-      'Библиотека пуста — запустите сканирование'));
-    return;
-  }
-  node.replaceChildren(el('div', { class: 'album-grid' },
-    ...state.albums.slice(0, 300).map((album) => el('button',
+  fill(node, el('p', { class: 'muted' }, 'Загрузка…'));
+
+  let offset = 0;
+  let total = 0;
+  const grid = el('div', { class: 'album-grid' });
+  const footer = el('div', { class: 'row pagination' });
+
+  const more = el('button', {
+    class: 'ghost',
+    onclick: () => loadPage(),
+  }, 'Показать ещё');
+
+  async function loadPage() {
+    more.disabled = true;
+    let data;
+    try {
+      data = await api(`/api/web/albums?limit=${PAGE_SIZE}&offset=${offset}`);
+    } catch (error) {
+      more.disabled = false;
+      toast(error.message, 'error');
+      return;
+    }
+    const items = data.items || [];
+    total = data.total ?? items.length;
+    offset += items.length;
+
+    if (!items.length && offset === 0) {
+      fill(node, el('p', { class: 'muted' },
+        'Библиотека пуста — запустите сканирование'));
+      return;
+    }
+
+    grid.append(...items.map((album) => el('button',
       { class: 'album', onclick: () => openAlbum(album.id) },
       coverImg('al', album.id, { className: 'album-cover' }),
       el('span', { class: 'album-name' }, album.name),
       el('span', { class: 'muted small ellipsis' }, album.artist || ''),
-    )),
-  ));
+    )));
+
+    const shown = grid.childElementCount;
+    fill(footer,
+      el('span', { class: 'muted small' },
+        `Показано ${shown} из ${total}`),
+      shown < total ? more : null,
+    );
+    more.disabled = false;
+  }
+
+  await loadPage();
+  fill(node, grid, footer);
 }
 
 async function renderArtistsInto(node) {
-  const data = await api('/api/web/artists');
-  const artists = data.items || [];
-  if (!artists.length) {
-    node.replaceChildren(el('p', { class: 'muted' }, 'Исполнителей нет'));
-    return;
-  }
-  node.replaceChildren(el('div', { class: 'artist-grid' },
-    ...artists.map((artist) => el('button', {
+  fill(node, el('p', { class: 'muted' }, 'Загрузка…'));
+
+  let offset = 0;
+  let total = 0;
+  const grid = el('div', { class: 'artist-grid' });
+  const footer = el('div', { class: 'row pagination' });
+
+  const more = el('button', {
+    class: 'ghost',
+    onclick: () => loadPage(),
+  }, 'Показать ещё');
+
+  async function loadPage() {
+    more.disabled = true;
+    let data;
+    try {
+      data = await api(`/api/web/artists?limit=${PAGE_SIZE}&offset=${offset}`);
+    } catch (error) {
+      more.disabled = false;
+      toast(error.message, 'error');
+      return;
+    }
+    const items = data.items || [];
+    total = data.total ?? items.length;
+    offset += items.length;
+
+    if (!items.length && offset === 0) {
+      fill(node, el('p', { class: 'muted' }, 'Исполнителей нет'));
+      return;
+    }
+
+    grid.append(...items.map((artist) => el('button', {
       class: 'artist',
       onclick: () => openArtist(artist.id),
       title: artist.name,
@@ -412,8 +519,18 @@ async function renderArtistsInto(node) {
       artistAvatar(artist),
       el('span', { class: 'artist-name' }, artist.name),
       el('span', { class: 'artist-meta' }, `${artist.album_count} альб.`),
-    )),
-  ));
+    )));
+
+    const shown = grid.childElementCount;
+    fill(footer,
+      el('span', { class: 'muted small' }, `Показано ${shown} из ${total}`),
+      shown < total ? more : null,
+    );
+    more.disabled = false;
+  }
+
+  await loadPage();
+  fill(node, grid, footer);
 }
 
 async function openArtist(artistId) {
@@ -569,48 +686,52 @@ function accordionSection({ id, title, action = null, body }) {
 async function renderHomeSections(node) {
   if (!node) return;
 
-  const [recent, added] = await Promise.all([
-    api('/api/web/recently-played?limit=6').catch(() => ({ items: [] })),
-    api('/api/web/recently-added?limit=12').catch(() => ({ items: [], albums: [] })),
-  ]);
+  // Две независимые секции: каждая появляется, как только пришли её данные.
+  // Раньше они ждали друг друга через Promise.all, и медленная история
+  // прослушиваний задерживала блок «Недавно добавленные».
+  const addedBox = el('div', {});
+  const playedBox = el('div', {});
+  fill(node, addedBox, playedBox);
 
-  const parts = [];
+  api('/api/web/recently-added?limit=12')
+    .then((added) => renderRecentlyAdded(addedBox, added.albums || []))
+    .catch(() => fill(addedBox));
 
-  // Недавно добавленные — крупные карточки альбомов, свёрнуты по умолчанию.
-  const albums = (added.albums || []).slice(0, 8);
-  if (albums.length) {
-    parts.push(accordionSection({
-      id: 'recentlyAdded',
-      title: 'Недавно добавленные',
-      body: el('div', { class: 'album-grid' },
-        ...albums.map((album) => el('button', {
-          class: 'album', onclick: () => openAlbum(album.id),
-        },
-          coverImg('al', album.id, { className: 'album-cover' }),
-          el('span', { class: 'album-name' }, album.name),
-          el('span', { class: 'album-artist ellipsis' }, album.artist || ''),
-        )),
-      ),
-    }));
-  }
+  api('/api/web/recently-played?limit=6')
+    .then((recent) => renderRecentlyPlayed(playedBox, recent.items || []))
+    .catch(() => fill(playedBox));
+}
 
-  // Недавно прослушанные — строки, тоже свёрнуты.
-  const played = recent.items || [];
-  if (played.length) {
-    parts.push(accordionSection({
-      id: 'recentlyPlayed',
-      title: 'Недавно прослушанные',
-      action: el('button', {
-        class: 'ghost small', onclick: () => setView('recent'),
-      }, 'Все'),
-      body: el('div', { class: 'list' },
-        ...played.map((track, i) => trackRow(track, { queue: played, index: i + 1 })),
-      ),
-    }));
-  }
+function renderRecentlyAdded(node, albums) {
+  const items = albums.slice(0, 8);
+  if (!items.length) { fill(node); return; }
+  fill(node, accordionSection({
+    id: 'recentlyAdded',
+    title: 'Недавно добавленные',
+    body: el('div', { class: 'album-grid' },
+      ...items.map((album) => el('button', {
+        class: 'album', onclick: () => openAlbum(album.id),
+      },
+        coverImg('al', album.id, { className: 'album-cover' }),
+        el('span', { class: 'album-name' }, album.name),
+        el('span', { class: 'album-artist ellipsis' }, album.artist || ''),
+      )),
+    ),
+  }));
+}
 
-  if (!parts.length) { fill(node); return; }
-  fill(node, ...parts);
+function renderRecentlyPlayed(node, played) {
+  if (!played.length) { fill(node); return; }
+  fill(node, accordionSection({
+    id: 'recentlyPlayed',
+    title: 'Недавно прослушанные',
+    action: el('button', {
+      class: 'ghost small', onclick: () => setView('recent'),
+    }, 'Все'),
+    body: el('div', { class: 'list' },
+      ...played.map((track, i) => trackRow(track, { queue: played, index: i + 1 })),
+    ),
+  }));
 }
 
 // Полная страница «Недавно прослушанные» из рейла.
@@ -1128,9 +1249,11 @@ async function renderSettings(view) {
       el('div', { class: 'setting-text' },
         el('strong', {}, item.label),
         el('span', { class: 'muted small' }, item.help),
-        item.overridden
-          ? el('span', { class: 'badge' }, 'изменено')
-          : null,
+        ...safeChildren(
+          item.overridden ? el('span', { class: 'badge' }, 'изменено') : null,
+          // Такие ключи читаются при старте: обещать мгновенный эффект нельзя.
+          item.restart ? el('span', { class: 'badge' }, 'после перезапуска') : null,
+        ),
       ),
       el('div', { class: 'setting-control' }, control),
     );
@@ -1162,11 +1285,29 @@ async function renderSettings(view) {
     },
   }, 'Сохранить') : null;
 
+  // Параметры запуска из .env: только чтение, но всё видно в одном месте.
+  const readonly = (data.readonly || []).map((item) => el('div', { class: 'setting' },
+    el('div', { class: 'setting-text' },
+      el('strong', {}, item.label),
+      el('span', { class: 'muted small' }, item.help),
+      el('span', { class: 'badge' }, 'только .env'),
+    ),
+    el('div', { class: 'setting-control' },
+      el('span', { class: 'mono small break' }, String(item.value))),
+  ));
+
   view.replaceChildren(
     el('h2', {}, 'Настройки'),
     ...safeChildren(isAdmin ? null : el('p', { class: 'muted' }, 'Изменять настройки может только администратор.')),
+    el('p', { class: 'muted small' },
+      'Сохранённые здесь значения главнее переменных окружения. ' +
+      'Пункты с пометкой «после перезапуска» вступают в силу после перезапуска контейнера.'),
     el('div', { class: 'settings' }, ...rows),
     el('div', { class: 'row' }, saveButton),
+    el('h3', {}, 'Параметры запуска'),
+    el('p', { class: 'muted small' },
+      'Задаются в .env и docker-compose. Меняются только перезапуском контейнера.'),
+    el('div', { class: 'settings' }, ...readonly),
   );
 }
 
@@ -1174,6 +1315,8 @@ function choiceLabel(choice) {
   return {
     artists: 'Исполнители', albums: 'Альбомы', playlists: 'Плейлисты',
     raw: 'Без перекодирования', flac: 'FLAC', alac: 'ALAC',
+    DEBUG: 'DEBUG (подробно)', INFO: 'INFO', WARNING: 'WARNING',
+    ERROR: 'ERROR (только ошибки)',
   }[choice] || choice;
 }
 

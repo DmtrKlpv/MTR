@@ -32,6 +32,9 @@ class SettingSpec:
     minimum: int | None = None
     maximum: int | None = None
     choices: tuple[str, ...] = ()
+    # Значение читается при старте. UI помечает такие пункты «после перезапуска»,
+    # а apply_runtime_settings не подхватывает их на лету.
+    restart: bool = False
 
     def coerce(self, raw: Any) -> Any:
         """Приводит значение к типу и проверяет границы.
@@ -125,6 +128,46 @@ SPECS: dict[str, SettingSpec] = {
         help="Сколько файлов читать одновременно при сканировании.",
         minimum=1, maximum=32,
     ),
+    # --- То, что раньше задавалось только через .env ---------------------
+    "watch_enabled": SettingSpec(
+        key="watch_enabled", kind="bool", default=False,
+        label="Наблюдение за библиотекой",
+        help="Следить за появлением и изменением файлов (MTR_WATCH). Включается на лету.",
+    ),
+    "watch_polling": SettingSpec(
+        key="watch_polling", kind="bool", default=False,
+        label="Опрос вместо inotify",
+        help="Нужно для Windows-монтирований и части сетевых томов (MTR_WATCH_POLL). "
+             "Требует перезапуска контейнера.",
+        restart=True,
+    ),
+    "watch_poll_ms": SettingSpec(
+        key="watch_poll_ms", kind="int", default=1000,
+        label="Период опроса, мс",
+        help="Только при включённом опросе (MTR_WATCH_POLL_MS). 1000 — разумный компромисс. "
+             "Требует перезапуска контейнера.",
+        minimum=100, maximum=60000, restart=True,
+    ),
+    "log_level": SettingSpec(
+        key="log_level", kind="choice", default="INFO",
+        label="Уровень логов",
+        help="Подробность записей в docker logs (MTR_LOG_LEVEL). Требует перезапуска контейнера.",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"), restart=True,
+    ),
+    "cookie_secure": SettingSpec(
+        key="cookie_secure", kind="bool", default=False,
+        label="Cookie только по HTTPS",
+        help="Включайте, когда сервер доступен по HTTPS (MTR_COOKIE_SECURE). "
+             "При обычном HTTP вход перестанет работать. Требует перезапуска контейнера.",
+        restart=True,
+    ),
+    "subsonic_api_version": SettingSpec(
+        key="subsonic_api_version", kind="text", default="1.16.1",
+        label="Версия Subsonic API",
+        help="Версия, которую сервер объявляет клиентам (MTR_SUBSONIC_VERSION). "
+             "Требует перезапуска контейнера.",
+        restart=True,
+    ),
 }
 
 
@@ -199,5 +242,6 @@ class SettingsRepository:
                 "default": spec.default,
                 "value": overrides.get(key, spec.default),
                 "overridden": key in overrides,
+                "restart": spec.restart,
             })
         return items

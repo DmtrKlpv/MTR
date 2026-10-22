@@ -6,6 +6,39 @@
 /* ---------- Сканирование ---------- */
 let scanPollTimer = null;
 
+/* Таблица ошибок скана: «файл / причина».
+
+   Показываем сразу, без раскрывающегося блока: этого просили, и это
+   действительно удобнее — при сбое хочется видеть список, а не кликать.
+   Прокрутка ограничена по высоте, иначе 500 строк растянут страницу. */
+function scanErrorTable(errors, total) {
+  if (!errors.length) {
+    return el('p', { class: 'small muted' },
+      `Ошибок ${total}, но их тексты не сохранены: запись сделана до обновления схемы.`);
+  }
+
+  const rows = errors.map((item) => el('tr', {},
+    el('td', { class: 'mono small path-cell' }, item.path || '—'),
+    el('td', { class: 'small' }, item.reason || '—'),
+  ));
+
+  return el('div', { class: 'error-table-wrap' },
+    el('table', { class: 'error-table' },
+      el('thead', {},
+        el('tr', {},
+          el('th', {}, 'Файл'),
+          el('th', {}, 'Причина'),
+        ),
+      ),
+      el('tbody', {}, ...rows),
+    ),
+    errors.length < total
+      ? el('p', { class: 'small muted' },
+          `Показаны первые ${errors.length} из ${total}.`)
+      : null,
+  );
+}
+
 async function renderScan(view) {
   stopScanPolling();
   const status = await api('/api/web/scan/status');
@@ -15,6 +48,8 @@ async function renderScan(view) {
     el('div', { class: 'progress-fill', id: 'scan-fill' }),
   );
   const info = el('div', { class: 'scan-info', id: 'scan-info' });
+  // Сюда updateScanView кладёт таблицу ошибок текущего прохода.
+  const liveErrors = el('div', { class: 'scan-errors-live', id: 'scan-errors' });
   const actions = el('div', { class: 'row' });
 
   const startButton = (mode, label, cls) => el('button', {
@@ -42,14 +77,22 @@ async function renderScan(view) {
     }, 'Обновить'),
   );
 
-  const rows = (history.items || []).map((run) => el('div', { class: 'row scan-run' },
-    el('span', { class: 'mono small' }, `#${run.run_id}`),
-    el('span', { class: 'small' }, run.mode === 'full' ? 'полный' : 'инкремент'),
-    el('span', { class: 'small muted' }, run.started_at.replace('T', ' ').slice(0, 19)),
-    el('span', { class: 'small' }, `+${run.added} / ~${run.updated} / -${run.removed}`),
-    run.failed ? el('span', { class: 'small error' }, `ошибок ${run.failed}`) : null,
-    el('span', { class: `badge status-${run.status}` }, run.status),
-  ));
+  const rows = (history.items || []).map((run) => {
+    const total = run.errors_total || run.failed || 0;
+    const errorTable = total ? scanErrorTable(run.errors || [], total) : null;
+
+    return el('div', { class: 'scan-run' },
+      el('div', { class: 'row scan-run-head' },
+        el('span', { class: 'mono small' }, `#${run.run_id}`),
+        el('span', { class: 'small' }, run.mode === 'full' ? 'полный' : 'инкремент'),
+        el('span', { class: 'small muted' }, run.started_at.replace('T', ' ').slice(0, 19)),
+        el('span', { class: 'small' }, `+${run.added} / ~${run.updated} / -${run.removed}`),
+        total ? el('span', { class: 'badge danger' }, `ошибок ${total}`) : null,
+        el('span', { class: `badge status-${run.status}` }, run.status),
+      ),
+      errorTable,
+    );
+  });
 
   fill(view,
     el('h2', {}, 'Сканирование'),
@@ -58,6 +101,7 @@ async function renderScan(view) {
       'Полный заново разбирает теги у всех файлов и помечает отсутствующие.'),
     bar,
     info,
+    liveErrors,
     actions,
     el('h3', {}, 'История'),
     rows.length ? el('div', { class: 'list' }, ...rows)
@@ -104,6 +148,7 @@ function startScanPolling(view) {
 function updateScanView(current) {
   const fillNode = document.querySelector('#scan-fill');
   const infoNode = document.querySelector('#scan-info');
+  const errorsNode = document.querySelector('#scan-errors');
   if (!fillNode || !infoNode) return;
 
   const percent = current.percent ?? 0;
@@ -130,6 +175,149 @@ function updateScanView(current) {
   if (current.error) pieces.push(current.error);
 
   fill(infoNode, el('span', {}, pieces.join(' · ')));
+
+  // Ошибки текущего прохода — той же таблицей, что и в истории.
+  if (errorsNode) {
+    const errors = current.recent_errors || [];
+    const total = current.failed || 0;
+    if (total && errors.length) {
+      fill(errorsNode,
+        el('h3', {}, `Ошибки текущего прохода (${total})`),
+        scanErrorTable(errors, total),
+      );
+    } else if (total) {
+      fill(errorsNode,
+        el('h3', {}, `Ошибки текущего прохода (${total})`),
+        el('p', { class: 'small muted' },
+          'Тексты появятся по мере разбора: список обновляется каждые 25 файлов.'),
+      );
+    } else {
+      fill(errorsNode);
+    }
+  }
+}
+
+/* ---------- Подробный статус скана на главной ----------
+
+   Пока идёт первый (или любой ручной) скан, главная показывает прогресс,
+   а не бесконечное «Загрузка…»: пока библиотека не проиндексирована,
+   основному интерфейсу просто нечего рисовать. Как только проход
+   завершается, панель уступает место обычной главной. */
+
+let homeScanTimer = null;
+
+function stopHomeScan() {
+  if (homeScanTimer) {
+    clearInterval(homeScanTimer);
+    homeScanTimer = null;
+  }
+}
+
+// Возвращает true, если главную сейчас занимает панель статуса.
+async function scanGate(view) {
+  stopHomeScan();
+  let status;
+  try {
+    status = await api('/api/web/scan/status');
+  } catch (error) {
+    return false;   // нет доступа/сети — пусть главная попробует сама
+  }
+  const current = status && status.current;
+  if (!current || current.status !== 'running') return false;
+
+  const box = el('div', { class: 'scan-status', id: 'scan-status' });
+  drawScanStatus(box, current, status);
+
+  fill(view,
+    el('h2', {}, 'Идёт сканирование библиотеки'),
+    el('p', { class: 'muted small' },
+      'Главная откроется автоматически, когда проход закончится. ' +
+      'Страницу можно не закрывать.'),
+    box,
+    el('div', { class: 'row' }, el('button', {
+      class: 'ghost', onclick: () => setView('scan'),
+    }, 'Подробнее о сканере')),
+  );
+
+  homeScanTimer = setInterval(async () => {
+    if (state.view !== 'library') { stopHomeScan(); return; }
+    let data;
+    try {
+      data = await api('/api/web/scan/status');
+    } catch (error) {
+      stopHomeScan();
+      return;
+    }
+    if (!data.current || data.current.status !== 'running') {
+      stopHomeScan();
+      setView('library');   // проход закончился — показываем основной интерфейс
+      return;
+    }
+    const node = document.querySelector('#scan-status');
+    if (!node) { stopHomeScan(); return; }
+    drawScanStatus(node, data.current, data);
+  }, 1000);
+
+  return true;
+}
+
+function drawScanStatus(node, current, status) {
+  const percent = current.percent ?? 0;
+  const stageLabels = {
+    walk: 'обход каталога и подсчёт файлов',
+    walk_done: 'файлы найдены, начинается разбор',
+    parsing: 'разбор тегов',
+    done: 'завершено',
+  };
+  const modeLabels = { full: 'полный', incremental: 'инкрементальный', watch: 'по изменениям' };
+  const started = current.started_at
+    ? String(current.started_at).replace('T', ' ').slice(0, 19)
+    : '—';
+
+  const rows = [
+    ['Режим', modeLabels[current.mode] || current.mode || '—'],
+    ['Этап', stageLabels[current.stage] || current.stage || 'подготовка'],
+    ['Начало', started],
+    ['Найдено файлов', String(current.seen ?? 0)],
+    ['Нужно разобрать', String(current.to_parse ?? 0)],
+    ['Разобрано', `${current.processed ?? 0} из ${current.to_parse ?? 0}`],
+    ['Новых', String(current.added ?? 0)],
+    ['Обновлено', String(current.updated ?? 0)],
+    ['Без изменений', String(current.unchanged ?? 0)],
+    ['Удалено', String(current.removed ?? 0)],
+    ['Ошибок', String(current.failed ?? 0)],
+  ];
+
+  const watcher = status && status.watcher;
+  const errors = current.recent_errors || [];
+  // Та же таблица, что и в истории: «файл / причина».
+  const errorBlock = errors.length
+    ? el('div', {},
+        el('h3', {}, `Ошибки (${current.failed || errors.length})`),
+        scanErrorTable(errors, current.failed || errors.length),
+      )
+    : null;
+
+  fill(node,
+    el('div', { class: 'progress' },
+      el('div', {
+        class: 'progress-fill running',
+        style: `width:${percent}%`,
+      }),
+    ),
+    el('p', { class: 'scan-info' },
+      `${percent}% · ${stageLabels[current.stage] || 'работа'} · разобрано ` +
+      `${current.processed ?? 0} из ${current.to_parse ?? 0}`),
+    el('div', { class: 'kv' }, ...rows.flatMap(([key, value]) => [
+      el('span', { class: 'muted' }, key),
+      el('span', { class: 'mono break' }, value),
+    ])),
+    watcher && watcher.state
+      ? el('p', { class: 'muted small' }, `Наблюдатель: ${watcher.state}, в очереди ${watcher.pending ?? 0}`)
+      : null,
+    current.error ? el('p', { class: 'error small' }, current.error) : null,
+    errorBlock,
+  );
 }
 
 /* ---------- Импорт плейлистов ---------- */

@@ -48,6 +48,8 @@ SKIP_DIR_NAMES: Final[frozenset[str]] = frozenset(
 PARSE_CONCURRENCY = 4
 # Размер батча для периодического прогресса.
 PROGRESS_EVERY = 25
+# Сколько ошибок отдавать в ответе на запуск скана (в историю пишется больше).
+MAX_API_ERRORS = 20
 
 ProgressCallback = Callable[[dict[str, object]], Awaitable[None] | None]
 
@@ -73,7 +75,7 @@ class ScanResult:
             "unchanged": self.counters.unchanged,
             "removed": self.counters.removed,
             "failed": self.counters.failed,
-            "errors": self.counters.errors[:20],
+            "errors": [e.as_dict() for e in self.counters.errors[:MAX_API_ERRORS]],
         }
 
 
@@ -86,12 +88,16 @@ class Scanner:
         music_root: str | Path,
         *,
         on_progress: ProgressCallback | None = None,
+        parse_concurrency: int = PARSE_CONCURRENCY,
     ) -> None:
         self._repo = repo
         self._root = Path(music_root)
         self._on_progress = on_progress
         self._lock = asyncio.Lock()
         self._cancelled = False
+        # Меняется из настроек: на слабом CPU меньше параллельных чтений даёт
+        # более ровную нагрузку, чем дефолтные 4.
+        self._parse_concurrency = max(1, int(parse_concurrency))
 
     # ------------------------------------------------------------------
     # Публичное API
@@ -99,6 +105,10 @@ class Scanner:
     def cancel(self) -> None:
         """Просит текущий проход остановиться после текущего файла."""
         self._cancelled = True
+
+    def set_parse_concurrency(self, value: int) -> None:
+        """Меняет число одновременных чтений тегов (со страницы настроек)."""
+        self._parse_concurrency = max(1, int(value))
 
     async def scan(
         self,
@@ -314,7 +324,7 @@ class Scanner:
         self, paths: list[str], counters: ScanCounters, run_id: int
     ) -> None:
         """Разбирает файлы с ограниченной параллельностью."""
-        semaphore = asyncio.Semaphore(PARSE_CONCURRENCY)
+        semaphore = asyncio.Semaphore(self._parse_concurrency)
         total = len(paths)
         processed = 0
 
@@ -336,6 +346,12 @@ class Scanner:
                         "added": counters.added,
                         "updated": counters.updated,
                         "failed": counters.failed,
+                        # Последняя ошибка — чтобы панель показала причину,
+                        # не дожидаясь конца прохода.
+                        "last_error": (
+                            counters.errors[-1].as_dict()
+                            if counters.errors else None
+                        ),
                     }
                 )
             _ = outcome
@@ -351,23 +367,19 @@ class Scanner:
         try:
             meta = await asyncio.to_thread(parse_track, path)
         except Exception as exc:  # noqa: BLE001 - парсер не должен бросать, но
-            counters.failed += 1
-            counters.errors.append(f"{path}: {type(exc).__name__}: {exc}")
+            counters.add_error(path, f"{type(exc).__name__}: {exc}")
             logger.warning("не удалось разобрать %s: %s", path, exc)
             return None
 
         if not meta.ok:
-            counters.failed += 1
-            message = f"{path}: {meta.error}"
-            counters.errors.append(message)
-            logger.warning("пропущен файл %s", message)
+            counters.add_error(path, meta.error or "не удалось прочитать теги")
+            logger.warning("пропущен файл %s: %s", path, meta.error)
             return None
 
         try:
             outcome = await self._repo.upsert_from_metadata(meta)
         except Exception as exc:  # noqa: BLE001
-            counters.failed += 1
-            counters.errors.append(f"{path}: запись в БД: {exc}")
+            counters.add_error(path, f"запись в БД: {exc}")
             logger.exception("ошибка записи трека %s", path)
             return None
 
