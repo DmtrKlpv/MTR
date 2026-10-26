@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import AsyncIterator
 
 import httpx
@@ -361,13 +363,29 @@ async def test_server_info_for_admin(web):
 
 
 async def test_scan_endpoint(web):
-    client, _ = web
+    """Скан ставится в очередь worker-процесса; здесь worker имитируется вручную."""
+    from app.worker import ipc
+    from app.worker.runtime import WorkerRuntime
+
+    client, app = web
     csrf = await login_admin(client)
+    ctx = app.state.ctx
+    # Worker «жив»: свежий heartbeat. Без него веб отвечает 503 (см. test_worker).
+    ipc.write_status(ipc.status_path(ctx.settings.data_dir), {"scan": {"status": "idle"}})
     response = await client.post(
         "/api/web/scan?mode=full", headers={"X-CSRF-Token": csrf}
     )
-    assert response.status_code == 200
-    assert response.json()["data"]["seen"] == 3
+    assert response.status_code == 202
+
+    runtime = WorkerRuntime(ctx, poll_sec=0.01)
+    assert await runtime.handle_commands() == 1
+    await runtime.wait_scan(timeout=60)
+    await runtime.publish_status()
+
+    status = (await client.get("/api/web/scan/status")).json()["data"]
+    assert status["current"]["status"] == "completed"
+    assert status["current"]["seen"] == 3
+    assert status["worker"]["alive"] is True
 
 
 # ----------------------------------------------------------------------
@@ -507,8 +525,16 @@ async def test_cover_art_works_with_session_cookie(web):
     client, app = web
     await login_admin(client)
     # Кладём обложку рядом с треком и сбрасываем кэш альбомов.
-    music_dir = app.state.ctx.settings.music_dir
+    ctx = app.state.ctx
+    music_dir = ctx.settings.music_dir
+    # Фоновая фаза обложек после скана могла уже записать «картинки нет».
+    # Дождаться её и снять маркеры, как при появлении обложки в тегах.
+    for _ in range(500):
+        if not ctx.cover_pass.running:
+            break
+        await asyncio.sleep(0.02)
     (music_dir / "cover.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 64)
+    await ctx.covers.clear_absent_markers()
 
     albums = (await client.get("/api/web/albums")).json()["data"]["items"]
     response = await client.get(f"/rest/getCoverArt?id=al-{albums[0]['id']}")

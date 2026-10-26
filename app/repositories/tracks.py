@@ -285,7 +285,10 @@ class TrackRepository:
         if not cleaned:
             return []
         limit = max(1, min(int(limit), 500))
-        like = f"%{cleaned.replace('%', r'\%').replace('_', r'\_')}%"
+        # Экранируем и обратную косую: без неё запрос с "\\" ломает шаблон LIKE
+        # (ESCAPE '\\' съедает следующий символ). Порядок замен важен: сначала "\\".
+        escaped = cleaned.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
+        like = f"%{escaped}%"
         rows = await self._db.fetch_all(
             """
             SELECT * FROM tracks
@@ -324,6 +327,10 @@ class TrackRepository:
     # ------------------------------------------------------------------
     # Запись
     # ------------------------------------------------------------------
+    def batch(self):
+        """Общая транзакция для пачки записей (см. library_scanner._parse_batch)."""
+        return self._db.transaction()
+
     async def upsert_from_metadata(self, meta: TrackMetadata) -> UpsertOutcome:
         """Вставляет или обновляет трек по пути.
 

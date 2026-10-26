@@ -168,6 +168,71 @@ async def _cmd_purge_missing(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_covers(args: argparse.Namespace) -> int:
+    """Очистка кеша обложек. Фонового прогрева больше нет.
+
+    Обложка извлекается при первом запросе getCoverArt и кладётся в кеш.
+    Поэтому единственная команда здесь — сброс кеша.
+    """
+    if not args.purge:
+        print("фонового прогрева обложек нет: обложка извлекается при запросе.")
+        print("для сброса кеша: python -m app.cli covers --purge")
+        return 0
+    ctx = await AppContext.create(Settings.from_env())
+    try:
+        removed = await ctx.covers.purge_all()
+        print(f"удалено записей кеша: {removed}")
+    finally:
+        await ctx.close()
+    return 0
+
+
+def _human_size(size: int) -> str:
+    """Размер по-человечески: 900 КБ, 12 МБ, 1.4 ГБ."""
+    value = float(max(0, size))
+    if value < 1024:
+        return f"{value:.0f} Б"
+    for unit in ("КБ", "МБ"):
+        value /= 1024
+        if value < 1024:
+            return f"{value:.0f} {unit}"
+    return f"{value / 1024:.1f} ГБ"
+
+
+def _human_duration(seconds: float) -> str:
+    """Длительность по-человечески: 40 с, 12 мин, 1 ч 20 мин."""
+    seconds = max(0.0, seconds)
+    if seconds < 1:
+        return "меньше секунды"
+    if seconds < 10:
+        return f"{seconds:.1f} с"
+    if seconds < 90:
+        return f"{seconds:.0f} с"
+    minutes = seconds / 60
+    # Порог «до 90 минут» здесь не годится: 3600 с — это ровно час, и он
+    # показывался как «60 мин». В часы переходим с 60 минут.
+    if minutes < 60:
+        return f"{minutes:.0f} мин"
+    hours = int(minutes // 60)
+    rest = int(minutes % 60)
+    if rest == 0:
+        return f"{hours} ч"
+    return f"{hours} ч {rest} мин"
+
+
+async def _cmd_bench_covers(args: argparse.Namespace) -> int:
+    """Меряет стоимость обложек: холодный путь против кеша."""
+    from app.bench_covers import bench_covers, format_bench
+
+    ctx = await AppContext.create(Settings.from_env())
+    try:
+        result = await bench_covers(ctx, albums=max(1, int(args.albums)))
+        print(format_bench(result))
+    finally:
+        await ctx.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mtr", description="MTR music server CLI")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -208,6 +273,25 @@ def build_parser() -> argparse.ArgumentParser:
         "purge-missing", help="удалить треки, чьи файлы исчезли"
     )
     p_purge.set_defaults(func=_cmd_purge_missing)
+
+    p_covers = sub.add_parser(
+        "covers", help="сбросить кеш обложек"
+    )
+    p_covers.add_argument(
+        "--purge", action="store_true",
+        help="очистить кеш обложек вместо прогрева",
+    )
+    p_covers.set_defaults(func=_cmd_covers)
+
+    p_bench = sub.add_parser(
+        "bench-covers",
+        help="замерить стоимость извлечения обложек и выигрыш от кеша",
+    )
+    p_bench.add_argument(
+        "--albums", type=int, default=60,
+        help="сколько альбомов взять в выборку (по умолчанию 60)",
+    )
+    p_bench.set_defaults(func=_cmd_bench_covers)
 
     return parser
 

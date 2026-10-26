@@ -26,8 +26,11 @@ ENV PYTHONUNBUFFERED=1 \
     MTR_LOG_LEVEL=INFO
 
 # ffmpeg нужен аудиоядру. Один слой с очисткой apt-списков.
+# libwebp*: колёса armv7 (piwheels) линкуются динамически к системным libwebp.so.7 и другим.
+# Без них PIL._webp не импортируется, и Pillow пишет ?WEBP support not installed?.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
+        libwebp7 libwebpmux3 libwebpdemux2 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -42,6 +45,10 @@ RUN pip install --no-cache-dir --only-binary=:all: \
 # --chown копирует сразу с нужным владельцем, без отдельного chown -R
 # (он бы создал лишний слой, дублирующий весь код в образе).
 COPY --chown=1000:1000 app ./app
+
+# Скрипты обслуживания (самопроверка образа). Нужны внутри контейнера:
+# docker exec mtr-app sh /app/scripts/selfcheck.sh
+COPY --chown=1000:1000 scripts ./scripts
 
 # Каталог состояния: обе БД, ключ шифрования, кэш обложек.
 RUN mkdir -p /data/covers /music \

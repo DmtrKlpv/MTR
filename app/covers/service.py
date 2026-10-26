@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import uuid
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -57,6 +60,72 @@ class CoverData:
     @property
     def size(self) -> int:
         return len(self.data)
+
+
+def _kind_of(data: bytes) -> str:
+    """Короткое имя формата по сигнатуре: для логов и проверки декодера."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    return "unknown"
+
+
+_WEBP_PROBE: bool | None = None
+
+
+def _probe_webp() -> bool:
+    """Честная проверка WebP: декодирует крошечный файл, а не смотрит флаг.
+
+    `features.check("webp")` иногда отвечает True, а декодер при этом не работает
+    (сборка Pillow на armv7). Поэтому один раз на процесс пробуем декодировать
+    настоящий WebP. Результат кешируется.
+    """
+    global _WEBP_PROBE
+    if _WEBP_PROBE is not None:
+        return _WEBP_PROBE
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+    except ImportError:
+        _WEBP_PROBE = False
+        return False
+    try:
+        buffer = BytesIO()
+        Image.new("RGB", (8, 8), (10, 20, 30)).save(buffer, format="WEBP")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with Image.open(BytesIO(buffer.getvalue())) as image:
+                image.load()
+        _WEBP_PROBE = True
+    except Exception:  # noqa: BLE001 - любой сбой = декодера нет
+        logger.warning(
+            "WebP не декодируется этой сборкой Pillow: обложки WebP отдаются как есть"
+        )
+        _WEBP_PROBE = False
+    return _WEBP_PROBE
+
+
+def decoder_available(data: bytes) -> bool:
+    """Есть ли в Pillow декодер для этих байт.
+
+    Только WebP зависит от сборки Pillow (на части колёс armv7 libwebp не
+    вкомпилирован, и Image.open падает с предупреждением «WEBP support not
+    installed»). Остальные форматы считаем доступными.
+    """
+    if _kind_of(data) != "webp":
+        return True
+    return _probe_webp()
+
+
+def webp_support() -> bool:
+    """Для диагностики (selfcheck, doctor): декодирует ли Pillow WebP на самом деле."""
+    return _probe_webp()
 
 
 def _mime_of(data: bytes) -> str:
@@ -170,6 +239,70 @@ def _from_ogg(path: Path) -> CoverData | None:
     return CoverData(picture.data, _mime_of(picture.data), "ogg:picture")
 
 
+# Максимальная сторона сохраняемой обложки, px.
+#
+# Выбрано по фактическим размерам в интерфейсе: карточка в сетке занимает
+# ~169-185 CSS px, то есть до ~370 физических пикселей при DPR 2. Крупная
+# обложка в карточке альбома ограничена max-width: 420px (.album-hero-cover),
+# при DPR 2 это 840 px — там 600 чуть мягче, но это одна картинка на экран.
+# Всё, что больше, — лишние мегабайты по сети и лишняя работа при отдаче.
+MAX_COVER_SIDE = 600
+
+# Качество JPEG для пересжатых обложек. 82 — точка, где на глаз не отличить
+# от оригинала, а файл в разы меньше.
+JPEG_QUALITY = 82
+
+
+def make_thumbnail(
+    data: bytes, *, max_side: int = MAX_COVER_SIDE
+) -> tuple[bytes, str] | None:
+    """Уменьшает картинку до max_side по большей стороне.
+
+    Возвращает (байты, mime) или None, если Pillow не смог разобрать формат —
+    тогда вызывающий код сохранит оригинал как есть.
+
+    Переводим в RGB: у PNG-обложек бывает альфа-канал, а JPEG его не хранит.
+    Белая подложка вместо чёрной — обложки почти всегда светлые по краям.
+    """
+    try:
+        from io import BytesIO
+
+        from PIL import Image, ImageOps
+    except ImportError:
+        logger.warning("Pillow не установлен — обложки сохраняются без уменьшения")
+        return None
+
+    if not decoder_available(data):
+        # Например, WebP без libwebp в Pillow (часто на armv7). Оригинал
+        # отдаём как есть: браузеры показывают WebP сами, только без уменьшения.
+        logger.debug("декодер для %s недоступен — отдаём оригинал", _kind_of(data))
+        return None
+
+    try:
+        with warnings.catch_warnings(), Image.open(BytesIO(data)) as image:
+            warnings.simplefilter("ignore")
+            image.load()
+            # Учитываем EXIF-поворот: иначе четверть обложек с телефонов
+            # сохранится лёжа.
+            try:
+                image = ImageOps.exif_transpose(image)
+            except Exception:  # noqa: BLE001 - EXIF битый, поворот не критичен
+                pass
+
+            if max(image.size) <= max_side:
+                return None  # уже маленькая: пересжимать вредно
+
+            image = image.convert("RGB")
+            image.thumbnail((max_side, max_side), Image.LANCZOS)
+
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+            return buffer.getvalue(), "image/jpeg"
+    except Exception:  # noqa: BLE001 - битая картинка не повод падать
+        logger.debug("не удалось уменьшить обложку", exc_info=True)
+        return None
+
+
 def extract_embedded(path: Path) -> CoverData | None:
     """Пробует все встроенные источники по расширению файла."""
     suffix = path.suffix.lower()
@@ -265,9 +398,24 @@ class CoverResolver:
             self.covers_dir.mkdir(parents=True, exist_ok=True)
             # Атомарная запись: временный файл + rename, чтобы параллельный
             # запрос не прочитал половину картинки.
-            tmp = target.with_suffix(target.suffix + ".tmp")
-            tmp.write_bytes(cover.data)
-            tmp.replace(target)
+            # Имя временного файла уникально на каждую запись: фаза обложек и
+            # запрос getCoverArt могут писать один ключ одновременно, и общее
+            # «.tmp» давало FileNotFoundError при replace.
+            tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                tmp.write_bytes(cover.data)
+                # Если параллельная запись уже положила файл — он идентичен
+                # (имя содержит хэш содержимого), replace просто перезапишет.
+                os.replace(tmp, target)
+            except FileNotFoundError:
+                # Временный файл исчез (очистка каталога). Не падаем: пробуем ещё раз.
+                if not target.is_file():
+                    raise
+            finally:
+                try:
+                    tmp.unlink()
+                except FileNotFoundError:
+                    pass
         return str(target), cover.size
 
     def is_inside_music(self, path: Path) -> bool:

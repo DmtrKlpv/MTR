@@ -762,6 +762,15 @@ input[type="search"] { -webkit-appearance: none; appearance: none; }
    в колонке 40% полноразмерный 40px не помещается. */
 .pl-hero-title { font-size: 30px; margin-bottom: 6px; }
 .album-hero-artist { color: var(--muted); font-size: 15px; }
+/* Ссылка на исполнителя в альбоме: выглядит как обычный текст (без подчёркивания
+   и цвета ссылки), но кликабельна и подсвечивается при наведении. */
+.artist-plain-link {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+.artist-plain-link:hover,
+.artist-plain-link:focus-visible { color: var(--text); outline: none; }
 
 /* ---------- Коллаж 2x2 из обложек ---------- */
 
@@ -1028,6 +1037,43 @@ label.inline {
 .mtr-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
 
+/* ---------- Хлебные крошки ----------
+
+   Заменяют кнопку «назад» в альбоме: видно, где находишься и куда вернуться.
+   Отступы сверху и снизу заданы здесь, а не у кнопки, чтобы крошки не липли
+   к шапке и к обложке.
+*/
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0 22px;
+  font-size: var(--fs-small);
+  color: var(--muted);
+  min-height: 32px;
+}
+.breadcrumbs a,
+.breadcrumbs button.breadcrumb-link {
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 4px 2px;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+.breadcrumbs a:hover,
+.breadcrumbs button.breadcrumb-link:hover { color: var(--text); }
+.breadcrumbs .sep { color: var(--muted-2); }
+.breadcrumbs .current { color: var(--text); font-weight: 600; }
+.breadcrumbs .crumb-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 6px;
+}
+
 /* ---------- Логин ---------- */
 
 .login-body {
@@ -1050,6 +1096,47 @@ label.inline {
 #login-form label { font-size: var(--fs-small); color: var(--muted); }
 #login-form input { width: 100%; }
 #login-form button { margin-top: 10px; width: 100%; }
+
+/* ---------- Первый запуск: создание администратора ----------
+
+   Раньше поля были в общей колонке с gap 8px и шириной карточки 384px:
+   подписи липли к полям, а сами поля были короче половины экрана.
+   Здесь карточка шире (576px = прежние 384 x 1.5), каждое поле — отдельная
+   группа с подписью и отступом, сами поля растянуты на всю ширину.
+*/
+.login-card.setup-card {
+  width: min(94vw, 576px);
+  text-align: left;
+  padding: 40px 36px;
+}
+.login-card.setup-card .setup-head { text-align: center; }
+.login-card.setup-card .setup-head .muted { margin: 6px 0 26px; }
+#setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;          /* отступ между группами полей */
+  text-align: left;
+  margin-top: 4px;
+}
+#setup-form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;           /* отступ между подписью и полем */
+}
+#setup-form label {
+  font-size: var(--fs-small);
+  color: var(--muted);
+  padding-left: 4px;
+}
+#setup-form input {
+  width: 100%;
+  min-width: 0;
+  padding: 13px 18px;
+  min-height: 46px;
+}
+#setup-form .field-hint { font-size: var(--fs-small); color: var(--muted-2); padding-left: 4px; }
+#setup-form button { width: 100%; min-height: 46px; margin-top: 6px; }
+#setup-form .error { margin-top: -6px; }
 
 /* ---------- Плеер: три зоны ---------- */
 
@@ -1272,3 +1359,25 @@ label.inline {
   gap: 12px;
   margin: 16px 0 4px;
 }
+
+/* ---------- Импорт плейлистов из папки и ресинк ---------- */
+.hidden { display: none !important; }
+.folder-block { margin: 16px 0 24px; padding: 14px 16px; border: 1px solid var(--border, rgba(127,127,127,.25)); border-radius: 10px; }
+.folder-block h3 { margin-top: 0; }
+.folder-progress { margin: 10px 0; }
+.folder-progress .progress-fill { transition: width .3s ease; }
+.check-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 0; }
+.remove-list { max-height: 280px; overflow: auto; margin: 6px 0; }
+.block { display: block; }
+
+/* ---------- Активность: скан и обложки ---------- */
+.activity {
+  margin: 12px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, rgba(127,127,127,.25));
+  border-radius: 10px;
+  background: rgba(127,127,127,.06);
+}
+.activity-title { font-weight: 600; margin-bottom: 8px; }
+.covers-progress { margin-top: 10px; }
+.covers-progress .progress-fill.running { transition: width .4s ease; }

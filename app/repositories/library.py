@@ -20,6 +20,42 @@ from app.repositories.tracks import TrackRow, _row_to_track
 logger = logging.getLogger(__name__)
 
 # Допустимые порядки сортировки для getAlbumList2.
+# Список альбомов: агрегаты по трекам считаются один раз (GROUP BY), а не подзапросом
+# на каждый альбом. Старый вариант на 1200 альбомах занимал ~5.5 с, на большой базе —
+# минуты, и страница «Альбомы» не открывалась. Порядок колонок и алиасов тот же.
+_ALBUM_LIST_SELECT = """
+WITH live AS (
+    SELECT album_id,
+           COUNT(*) AS song_count,
+           COALESCE(SUM(duration_ms), 0) AS duration_ms
+      FROM tracks
+     WHERE missing = 0
+     GROUP BY album_id
+),
+played AS (
+    SELECT t.album_id, SUM(ps.play_count) AS plays
+      FROM tracks t JOIN play_stats ps ON ps.track_id = t.id
+     GROUP BY t.album_id
+),
+last_played AS (
+    SELECT t.album_id, MAX(pb.played_at) AS last_play
+      FROM tracks t JOIN playback_log pb ON pb.track_id = t.id
+     GROUP BY t.album_id
+)
+SELECT
+    a.id, a.name, a.artist_id, a.year, a.genre, a.created_at,
+    ar.name AS artist_name,
+    l.song_count AS song_count,
+    l.duration_ms AS duration_ms,
+    COALESCE(p.plays, 0) AS plays,
+    lp.last_play AS last_play
+  FROM albums a
+  JOIN live l ON l.album_id = a.id
+  JOIN artists ar ON ar.id = a.artist_id
+  LEFT JOIN played p ON p.album_id = a.id
+  LEFT JOIN last_played lp ON lp.album_id = a.id
+"""
+
 ALBUM_SORTS: dict[str, str] = {
     "newest": "a.created_at DESC, a.id DESC",
     "recent": "COALESCE(last_play, '') DESC, a.id DESC",
@@ -151,8 +187,11 @@ class LibraryRepository:
             clauses.append("a.year <= ?")
             params.append(int(to_year))
 
+        # Фильтры по альбому: live-треки уже в JOIN live, поэтому здесь только атрибуты альбома.
+        attr_clauses = [c for c in clauses if not c.startswith("(SELECT COUNT")]
+        where = f" WHERE {' AND '.join(attr_clauses)}" if attr_clauses else ""
         sql = (
-            f"{_ALBUM_SELECT} WHERE {' AND '.join(clauses)} "
+            f"{_ALBUM_LIST_SELECT}{where} "
             f"ORDER BY {order} LIMIT ? OFFSET ?"
         )
         rows = await self._db.fetch_all(sql, (*params, limit, offset))
@@ -187,10 +226,11 @@ class LibraryRepository:
         return [_row_to_track(row) for row in rows]
 
     async def count_albums(self) -> int:
+        # Альбомы с хотя бы одним живым треком: один проход по tracks, без подзапроса на альбом.
         return int(
             await self._db.fetch_value(
-                "SELECT COUNT(*) FROM albums a WHERE (SELECT COUNT(*) FROM tracks t "
-                "WHERE t.album_id = a.id AND t.missing = 0) > 0",
+                "SELECT COUNT(DISTINCT album_id) FROM tracks "
+                "WHERE missing = 0 AND album_id IS NOT NULL",
                 default=0,
             )
             or 0
@@ -208,19 +248,15 @@ class LibraryRepository:
         и рисовать их все одним куском — это и запрос на тысячи строк, и
         столько же узлов в DOM.
         """
+        # Один проход по живым трекам: группируем по альбому и исполнителю.
+        # Исполнитель попадает в список, если у него есть хотя бы один живой трек.
         sql = """
-            SELECT ar.id, ar.name,
-                   (SELECT COUNT(*) FROM albums a
-                     WHERE a.artist_id = ar.id
-                       AND EXISTS (SELECT 1 FROM tracks t
-                                    WHERE t.album_id = a.id
-                                      AND t.missing = 0))
-                   AS album_count
-              FROM artists ar
-             WHERE EXISTS (SELECT 1 FROM albums a
-                            JOIN tracks t ON t.album_id = a.id
-                           WHERE a.artist_id = ar.id
-                             AND t.missing = 0)
+            SELECT ar.id, ar.name, COUNT(DISTINCT a.id) AS album_count
+              FROM tracks t
+              JOIN albums a ON a.id = t.album_id
+              JOIN artists ar ON ar.id = a.artist_id
+             WHERE t.missing = 0
+             GROUP BY ar.id, ar.name
              ORDER BY ar.name COLLATE NOCASE
         """
         params: list[object] = []
@@ -242,11 +278,13 @@ class LibraryRepository:
         return int(
             await self._db.fetch_value(
                 """
-                SELECT COUNT(*) FROM artists ar
-                 WHERE EXISTS (SELECT 1 FROM albums a
-                                JOIN tracks t ON t.album_id = a.id
-                               WHERE a.artist_id = ar.id
-                                 AND t.missing = 0)
+                SELECT COUNT(*) FROM (
+                    SELECT a.artist_id
+                      FROM tracks t
+                      JOIN albums a ON a.id = t.album_id
+                     WHERE t.missing = 0
+                     GROUP BY a.artist_id
+                )
                 """,
                 default=0,
             )
@@ -337,13 +375,45 @@ class LibraryRepository:
             return []
         # Ищем по названию альбома И по имени исполнителя: запрос "Queen"
         # должен находить альбомы Queen, даже если слово не в названии.
+        #
+        # Порядок важен для скорости: сначала отбираем подходящие альбомы по LIKE
+        # (их единицы), и только потом считаем агрегаты по трекам — один раз
+        # GROUP BY, а не подзапросом на каждый альбом. Прежний вариант на
+        # 8000 альбомах и 120000 треках занимал 3.2 с и выглядел как зависание.
+        limit = max(1, min(int(limit), 200))
         rows = await self._db.fetch_all(
-            f"{_ALBUM_SELECT} WHERE (a.name LIKE ? ESCAPE '\\' "
-            "OR ar.name LIKE ? ESCAPE '\\') "
-            "AND (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id "
-            "AND t.missing = 0) > 0 "
-            "ORDER BY a.name COLLATE NOCASE LIMIT ?",
-            (like, like, max(1, min(limit, 200))),
+            """
+            WITH matched AS (
+                SELECT a.id, a.name
+                  FROM albums a
+                  JOIN artists ar ON ar.id = a.artist_id
+                 WHERE (a.name  LIKE ? ESCAPE '\\'
+                     OR ar.name LIKE ? ESCAPE '\\')
+                 ORDER BY a.name COLLATE NOCASE
+                 LIMIT ?
+            ),
+            live AS (
+                SELECT album_id,
+                       COUNT(*) AS song_count,
+                       COALESCE(SUM(duration_ms), 0) AS duration_ms
+                  FROM tracks
+                 WHERE missing = 0
+                 GROUP BY album_id
+            )
+            SELECT a.id, a.name, a.artist_id, a.year, a.genre, a.created_at,
+                   ar.name AS artist_name,
+                   live.song_count AS song_count,
+                   live.duration_ms AS duration_ms,
+                   0 AS plays,
+                   NULL AS last_play
+              FROM matched m
+              JOIN albums a ON a.id = m.id
+              JOIN artists ar ON ar.id = a.artist_id
+              -- JOIN, а не LEFT JOIN: альбом без живых треков в поиск не попадает
+              JOIN live ON live.album_id = a.id
+             ORDER BY a.name COLLATE NOCASE
+            """,
+            (like, like, limit),
         )
         return [_row_to_album(row) for row in rows]
 
@@ -351,22 +421,30 @@ class LibraryRepository:
         like = _like(query)
         if like is None:
             return []
+        # Сначала отбор по имени, затем один агрегат по живым трекам.
+        # Подзапрос на каждого исполнителя здесь был главной причиной тормозов.
         rows = await self._db.fetch_all(
             """
-            SELECT ar.id, ar.name,
-                   (SELECT COUNT(*) FROM albums a WHERE a.artist_id = ar.id
-                     AND (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id
-                           AND t.missing = 0) > 0) AS album_count
-              FROM artists ar
-             WHERE ar.name LIKE ? ESCAPE '\\'
-             ORDER BY ar.name COLLATE NOCASE LIMIT ?
+            WITH matched AS (
+                SELECT ar.id, ar.name
+                  FROM artists ar
+                 WHERE ar.name LIKE ? ESCAPE '\\'
+                 ORDER BY ar.name COLLATE NOCASE
+                 LIMIT ?
+            )
+            SELECT m.id AS id, m.name AS name,
+                   COUNT(DISTINCT a.id) AS album_count
+              FROM matched m
+              JOIN albums a ON a.artist_id = m.id
+              JOIN tracks t ON t.album_id = a.id AND t.missing = 0
+             GROUP BY m.id, m.name
+             ORDER BY m.name COLLATE NOCASE
             """,
             (like, max(1, min(limit, 200))),
         )
         return [
             ArtistRow(int(row["id"]), str(row["name"]), int(row["album_count"] or 0))
             for row in rows
-            if int(row["album_count"] or 0) > 0
         ]
 
 

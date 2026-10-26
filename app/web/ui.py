@@ -254,7 +254,6 @@ async def static_file(filename: str):
     """
     from pathlib import Path
 
-    from fastapi.responses import FileResponse
 
     # Иконки — отдельный каталог и отдельный маршрут: разрешённый список
     # имён не смешивается с кодом и стилями.
@@ -262,7 +261,9 @@ async def static_file(filename: str):
         "app.js": "application/javascript",
         "login.js": "application/javascript",
         "setup.js": "application/javascript",
+        "cover_queue.js": "application/javascript",
         "scan_import.js": "application/javascript",
+        "folder_sync.js": "application/javascript",
         "dialogs.js": "application/javascript",
         "style.css": "text/css",
         "theme.css": "text/css",

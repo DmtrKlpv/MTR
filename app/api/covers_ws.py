@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 
 from fastapi import (
     APIRouter,
@@ -38,8 +37,7 @@ from fastapi.responses import JSONResponse, Response
 from app.bootstrap import AppContext
 from app.subsonic.auth import AuthContext
 from app.subsonic.deps import require_auth, require_auth_or_session
-from app.subsonic.errors import ErrorCode, SubsonicError
-from app.subsonic.response import ok_response
+from app.subsonic.errors import SubsonicError
 
 logger = logging.getLogger(__name__)
 
@@ -178,9 +176,14 @@ async def scan_progress(websocket: WebSocket) -> None:
 
 async def _progress_payload(ctx: AppContext) -> dict:
     """Собирает состояние: наблюдатель + последний скан из БД."""
+    # Наблюдатель живёт в worker-процессе: его состояние берём из статуса worker-а.
+    from app.worker.ipc import read_status, status_path
+
+    status = read_status(status_path(ctx.settings.data_dir))
+    watcher_view = status.get("watcher") or {}
     payload: dict = {
-        "watcher": ctx.watcher.state if ctx.watcher else "disabled",
-        "pending": ctx.watcher.pending if ctx.watcher else 0,
+        "watcher": watcher_view.get("state", "disabled"),
+        "pending": int(watcher_view.get("pending", 0) or 0),
         "tracks": await ctx.tracks.count_tracks(),
     }
 

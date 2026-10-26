@@ -36,6 +36,15 @@ from app.web.deps import (
     require_admin,
 )
 from app.web.sessions import SessionRecord
+from app.scanner.state import ScanState
+from app.worker.ipc import enqueue, read_status, status_path, worker_alive
+
+# Фаза обложек до первого статуса worker-а: ничего не делает.
+IDLE_COVERS = {
+    "state": "idle", "total": 0, "done": 0, "made": 0, "absent": 0, "failed": 0,
+    "percent": 0, "current_album": None, "current_album_sec": None,
+    "elapsed_sec": None, "eta_sec": None, "last_error": None, "paused_for_user": False,
+}
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/web", tags=["web"])
@@ -178,6 +187,22 @@ async def stats(
     )
 
 
+@router.get("/covers/ready")
+async def covers_ready(
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(current_session),
+    keys: str = Query("", max_length=8000),
+) -> JSONResponse:
+    """Готовность обложек пачкой: ready / absent для уже известных ключей.
+
+    Не извлекает обложки и не читает файлы. Ключи вида al-<id> и tr-<id>.
+    Неизвестные ключи в ответе отсутствуют: клиент их не запрашивает.
+    """
+    raw = [part.strip() for part in keys.split(",") if part.strip()]
+    valid = [k for k in raw if k[:3] in ("al-", "tr-") and k[3:].isdigit()]
+    return _ok({"ready": await ctx.covers.ready_keys(valid)})
+
+
 @router.get("/albums")
 async def albums(
     ctx: AppContext = Depends(get_ctx),
@@ -222,6 +247,8 @@ async def album_detail(
             "id": album.id,
             "name": album.name,
             "artist": album.artist_name,
+            # Нужен для ссылки на альбомы исполнителя прямо со страницы альбома.
+            "artist_id": album.artist_id,
             "year": album.year,
             "tracks": [
                 {
@@ -231,6 +258,8 @@ async def album_detail(
                     "album": track.album,
                     "duration": track.duration_sec,
                     "track_number": track.track_number,
+                    # Обложка трека берётся из альбома (al-<id>): только эти ключи кешируются.
+                    "album_id": album.id,
                 }
                 for track in tracks
             ],
@@ -338,29 +367,39 @@ async def record_play_event(
     return _ok({"track_id": track_id})
 
 
+async def _no_worker(ctx: AppContext) -> JSONResponse | None:
+    """Возвращает ответ 503, если worker-процесс не отвечает. Иначе None."""
+    status = read_status(status_path(ctx.settings.data_dir))
+    if worker_alive(status):
+        return None
+    return _fail(
+        "Служба сканирования не запущена. Смотрите журнал контейнера: "
+        "worker перезапускается автоматически.",
+        503,
+    )
+
+
 @router.post("/scan")
 async def trigger_scan(
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(admin_csrf),
     mode: str = Query("incremental"),
 ) -> JSONResponse:
-    """Запускает индексацию. Синхронно: UI ждёт и показывает итог."""
+    """Ставит скан в очередь worker-процесса и сразу отвечает 202.
+
+    Скан идёт в отдельном процессе: веб-сервер не делит с ним соединение и event loop.
+    Прогресс — через GET /scan/status.
+    """
     if mode not in ("full", "incremental"):
-        raise HTTPException(
-            status_code=400, detail="mode must be full or incremental"
-        )
-    state = ctx.scan_state
-    if not await state.begin(mode):
-        # Уже идёт: не запускаем второй проход, сообщаем текущее состояние.
+        raise HTTPException(status_code=400, detail="mode must be full or incremental")
+    unavailable = await _no_worker(ctx)
+    if unavailable is not None:
+        return unavailable
+    status = read_status(status_path(ctx.settings.data_dir))
+    if (status.get("scan") or {}).get("status") == "running":
         return _fail("Сканирование уже выполняется", 409)
-    try:
-        result = await ctx.scanner.scan(mode=mode)
-        await state.finish(status="completed")
-    except Exception as exc:  # noqa: BLE001 - причину показываем в UI
-        logger.exception("скан из веб-интерфейса не удался")
-        await state.fail(str(exc))
-        return _fail(f"Скан не удался: {exc}", 500)
-    return _ok(result.as_dict())
+    await enqueue(ctx.music_db, "scan", {"mode": mode})
+    return _ok({"started": True, "mode": mode, "queued": True}, status_code=202)
 
 
 @router.get("/scan/status")
@@ -368,17 +407,19 @@ async def scan_status(
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(current_session),
 ) -> JSONResponse:
-    """Текущее состояние и прогресс. Опрашивается, пока идёт скан.
+    """Состояние скана и фазы обложек из статуса worker-процесса.
 
-    Плюс последний завершённый проход из БД: после перезапуска контейнера
-    состояние в памяти пустое, а история должна остаться.
+    Плюс последний завершённый проход из БД: после перезапуска контейнера история остаётся.
     """
-    payload = {"current": ctx.scan_state.as_dict(), "watcher": None, "last_run": None}
-    if ctx.watcher is not None:
-        payload["watcher"] = {
-            "state": ctx.watcher.state,
-            "pending": ctx.watcher.pending,
-        }
+    status = read_status(status_path(ctx.settings.data_dir))
+    alive = worker_alive(status)
+    payload = {
+        "current": status.get("scan") or ScanState().as_dict(),
+        "covers": status.get("covers") or IDLE_COVERS,
+        "watcher": status.get("watcher"),
+        "worker": {"alive": alive, "heartbeat": status.get("heartbeat")},
+        "last_run": None,
+    }
     row = await ctx.music_db.fetch_one(
         "SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1"
     )
@@ -727,9 +768,27 @@ async def server_info(
             "subsonic_api_version": settings.subsonic_api_version,
             "tracks": library.get("tracks", 0),
             "missing": library.get("missing", 0),
+            # Раньше это была плашка на главной; теперь строка во вкладке «Сервер».
+            "users": await ctx.users.count_users(),
             "covers": covers,
         }
     )
+
+
+@router.post("/covers/warm")
+async def warm_covers(
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(admin_csrf),
+) -> JSONResponse:
+    """Пересканирование обложек: ставит команду worker-у запустить фазу обложек.
+
+    Кнопка перенесена в раздел «Сканирование»: там же, где сам скан.
+    """
+    unavailable = await _no_worker(ctx)
+    if unavailable is not None:
+        return unavailable
+    await enqueue(ctx.music_db, "covers", {"mode": "incremental"})
+    return _ok({"queued": True}, status_code=202)
 
 
 @router.post("/covers/purge")
@@ -737,34 +796,15 @@ async def purge_covers(
     ctx: AppContext = Depends(get_ctx),
     session: SessionRecord = Depends(admin_csrf),
 ) -> JSONResponse:
-    """Чистит кэш обложек: записи в БД и файлы на диске."""
-    rows = await ctx.music_db.fetch_all("SELECT file_path FROM cover_cache")
-    removed = 0
-    covers_dir = ctx.settings.covers_dir.resolve()
-    for row in rows:
-        raw = str(row["file_path"])
-        candidate = (covers_dir / raw.split("/")[-1]).resolve()
-        # Защита: удаляем только внутри COVERS_DIR.
-        try:
-            candidate.relative_to(covers_dir)
-        except ValueError:
-            continue
-        try:
-            if candidate.is_file():
-                candidate.unlink()
-                removed += 1
-        except OSError:
-            continue
-    await ctx.music_db.execute("DELETE FROM cover_cache")
-    # Отрицательный кеш держится в памяти: после очистки обложки должны
-    # искаться заново, иначе отсутствие картинки запомнится навсегда.
-    ctx.covers.forget_missing()
-    return _ok({"files_removed": removed, "rows": len(rows)})
+    """Чистит кеш обложек: записи в БД и файлы на диске.
+
+    Логика живёт в репозитории, чтобы CLI (`covers --purge`) делал ровно то
+    же самое, а не свою копию.
+    """
+    removed = await ctx.covers.purge_all()
+    return _ok({"files_removed": removed})
 
 
-# ----------------------------------------------------------------------
-# Свой аккаунт
-# ----------------------------------------------------------------------
 @router.post("/account/password")
 async def change_own_password(
     request: Request,
@@ -819,6 +859,7 @@ def _track_json(track) -> dict:
         "album": track.album,
         "duration": track.duration_sec,
         "track_number": track.track_number,
+        "album_id": track.album_id,
     }
 
 
@@ -1050,7 +1091,7 @@ async def get_settings(
         {
             "items": await ctx.settings_repo.describe(),
             # Параметры, которые нельзя менять из интерфейса. Показываем их
-            # только для чтения, чтобы всё из .env было видно в одном месте.
+            # только для чтения, чтобы параметры запуска было видно в одном месте.
             "readonly": _readonly_settings(ctx),
         }
     )
@@ -1150,17 +1191,8 @@ async def _refresh_runtime_settings(ctx: AppContext) -> None:
     # транскодов читаются из него в момент запроса.
     await apply_runtime_settings(ctx)
 
-    overrides = await ctx.settings_repo.all_overrides()
-    interval = int(overrides.get("scan_interval_sec", ctx.settings.scan_interval_sec) or 0)
-    watch = bool(overrides.get("watch_enabled", ctx.settings.watch_enabled))
-    if ctx.watcher is not None:
-        ctx.watcher.set_interval(interval)
-        # Наблюдатель создаётся всегда, но фоновые задачи до этого могли не
-        # стартовать (при первом запуске оба параметра были выключены).
-        if watch or interval > 0:
-            await ctx.watcher.start()
-        else:
-            await ctx.watcher.stop()
+    # Наблюдатель и фаза обложек живут в worker-процессе: сообщаем ему, что настройки изменились.
+    await enqueue(ctx.music_db, "reload")
 
 
 # ----------------------------------------------------------------------
