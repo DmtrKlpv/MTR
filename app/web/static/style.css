@@ -912,17 +912,37 @@ label.inline {
 
 /* ---------- Импорт ---------- */
 
-.import-list { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }
+/* Список импортированных плейлистов.
+   Раньше карточка занимала много места: 14 px по вертикали, иконка 24 px,
+   отдельные строки под метаданные. Теперь высота меньше: плотные отступы,
+   метаданные в одну строку с названием. */
+.import-list { display: flex; flex-direction: column; gap: 8px; margin: 14px 0; }
 .import-card {
   background: var(--panel);
-  border-radius: var(--radius-lg);
-  padding: 14px 16px;
+  border-radius: var(--radius);
+  padding: 9px 12px;
 }
+.import-card .row { gap: 8px; }
+.import-card .track-main { min-width: 0; }
+/* Строка «треков N из M» — компактно, сразу под названием, без лишней высоты. */
+.import-card .import-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-size: var(--fs-small);
+  color: var(--muted);
+  margin-top: 2px;
+}
+.import-card .import-controls { gap: 10px; margin-top: 6px; }
+.import-card select { padding: 6px 12px; min-width: 130px; }
+.import-card .unmatched { margin-top: 6px; }
+
 .import-status {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px; height: 24px;
+  width: 22px; height: 22px;
   flex: none;
   font-weight: 700;
   border-radius: 50%;
@@ -933,10 +953,24 @@ label.inline {
 }
 .import-status.error { color: var(--danger); background: rgba(255, 95, 95, .14); }
 .import-status.skipped { color: var(--muted); }
-.import-status:not(.created):not(.merged):not(.replaced):not(.error):not(.skipped) {
-  border: 2px solid var(--line-2);
-  border-top-color: var(--accent);
-  animation: spin .8s linear infinite;
+/* Ожидание больше не крутится спиннером: жёлтый знак вопроса означает
+   «ещё не обработан», и по нему спокойно видно, что процесс идёт. */
+.import-status.pending {
+  color: var(--warn, #f0b429);
+  background: rgba(240, 180, 41, .14);
+  background-image: url("/static/icons/help.svg");
+  background-size: 15px 15px;
+  background-position: center;
+  background-repeat: no-repeat;
+  font-size: 0;
+}
+.import-status:not(.created):not(.merged):not(.replaced):not(.error):not(.skipped):not(.pending) {
+  color: var(--warn, #f0b429);
+  background: rgba(240, 180, 41, .14);
+  background-image: url("/static/icons/help.svg");
+  background-size: 15px 15px;
+  background-position: center;
+  background-repeat: no-repeat;
   font-size: 0;
 }
 @keyframes spin { to { transform: rotate(360deg); } }

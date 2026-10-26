@@ -260,13 +260,46 @@ function breadcrumbs(items) {
 // Переключение вкладки библиотеки из крошек.
 //
 // Раньше здесь был просто setView('library'): он перерисовывает главную целиком,
-// и список альбомов оказывался ниже приветствия, поиска и секций — выглядело как
-// «перешли на главную». Теперь после перерисовки прокручиваем к самому списку.
+// и список альбомов оказывался ниже приветствия и секций — выглядело как
+// «перешли на главную». Прокрутка не помогала. Теперь для альбомов есть
+// отдельный вид без главной (renderAlbumsView), остальные вкладки — как раньше.
 async function switchLibraryTab(kind) {
   state.libraryView = kind;
-  await setView('library');
-  const body = document.querySelector('#library-body');
-  if (body) body.scrollIntoView({ block: 'start' });
+  await setView(kind === 'albums' ? 'albums' : 'library');
+}
+
+/* ---------- Список альбомов отдельным видом ----------
+
+   Крошка «Альбомы» вела на setView('library'), а это рисует главную целиком:
+   приветствие, поиск, «Недавно добавленное». Список оказывался ниже экрана,
+   и переход выглядел как возврат на главную. Здесь отдельный вид: крошки,
+   переключатель и сетка — больше ничего.
+*/
+async function renderAlbumsView(view) {
+  const switcher = librarySwitcher();
+  fill(view,
+    breadcrumbs([{ label: 'Библиотека', view: 'library' }, { label: 'Альбомы', current: true }]),
+    el('div', { class: 'section-head' }, el('h2', {}, 'Альбомы')),
+    switcher,
+    el('div', { id: 'library-body' }, loadingNote()),
+  );
+  await renderAlbumsInto($('#library-body'));
+}
+
+// Переключатель вкладок библиотеки. Общий для главной и вида «Альбомы».
+function librarySwitcher() {
+  return el('div', { class: 'segmented', role: 'tablist' },
+    ...['artists', 'albums', 'playlists'].map((kind) => el('button', {
+      class: 'segment' + (state.libraryView === kind ? ' active' : ''),
+      role: 'tab',
+      'aria-selected': state.libraryView === kind ? 'true' : 'false',
+      onclick: () => {
+        state.libraryView = kind;
+        // Список альбомов — отдельным видом; остальные вкладки остаются на главной.
+        setView(kind === 'albums' ? 'albums' : 'library');
+      },
+    }, { artists: 'Исполнители', albums: 'Альбомы', playlists: 'Плейлисты' }[kind])),
+  );
 }
 
 function coverUrl(kind, id) {
@@ -394,6 +427,7 @@ function setView(name) {
   view.replaceChildren(loadingNote());
   const loaders = {
     library: renderLibrary,
+    albums: renderAlbumsView,
     playlists: renderPlaylists,
     starred: renderStarred,
     recent: renderRecent,
@@ -530,17 +564,7 @@ async function renderLibrary(view) {
   });
 
   const summary = el('div', { class: 'cards' });
-  const switcher = el('div', { class: 'segmented', role: 'tablist' },
-    ...['artists', 'albums', 'playlists'].map((kind) => el('button', {
-      class: 'segment' + (state.libraryView === kind ? ' active' : ''),
-      role: 'tab',
-      'aria-selected': state.libraryView === kind ? 'true' : 'false',
-      onclick: () => {
-        state.libraryView = kind;
-        setView('library');
-      },
-    }, { artists: 'Исполнители', albums: 'Альбомы', playlists: 'Плейлисты' }[kind])),
-  );
+  const switcher = librarySwitcher();
 
   // Каркас рисуем сразу. Раньше экран ждал /stats и только потом появлялся —
   // на большой библиотеке это и выглядело как зависшее «Загрузка…».
@@ -1634,20 +1658,8 @@ async function renderServer(view) {
       el('span', { class: 'muted' }, key),
       el('span', { class: 'mono break' }, String(value)),
     ])),
-    // Пересканирование обложек перенесено в раздел «Сканирование».
-    el('div', { class: 'row wrap' },
-      el('button', {
-        class: 'ghost danger',
-        onclick: async () => {
-          const ok = await confirmDialog(
-            'Файлы обложек будут удалены и созданы заново при следующем запросе.',
-            { title: 'Очистить кэш обложек?', okLabel: 'Очистить' });
-          if (!ok) return;
-          await api('/api/web/covers/purge', { method: 'POST' });
-          toast('Кэш обложек очищен', 'ok');
-          setView('server');
-        },
-      }, 'Очистить кэш обложек')),
+    // Работа с обложками живёт в разделе «Сканирование»: там же, где сам скан.
+    // Здесь дублировать кнопки не нужно.
   );
 }
 

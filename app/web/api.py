@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import logging
@@ -36,6 +37,7 @@ from app.web.deps import (
     require_admin,
 )
 from app.web.sessions import SessionRecord
+from app.playlists.import_jobs import ImportJobs, run_import
 from app.scanner.state import ScanState
 from app.worker.ipc import enqueue, read_status, status_path, worker_alive
 
@@ -1219,8 +1221,15 @@ async def get_prefs(
 # ----------------------------------------------------------------------
 # Импорт плейлистов из папки
 # ----------------------------------------------------------------------
+def _import_item(path: str, name: str):
+    """Элемент прогресса импорта: состояние одного плейлиста."""
+    from app.playlists.import_jobs import ImportItem
+
+    return ImportItem(path=path, name=name)
+
+
 async def _build_plans(
-    ctx: AppContext, *, dir_override: str | None = None
+    ctx: AppContext, *, dir_override: str | None = None, job=None
 ) -> tuple[list, list[str], dict]:
     """Общий разбор для превью и применения.
 
@@ -1241,17 +1250,36 @@ async def _build_plans(
 
     files, warnings = importer.find_playlist_files(search_root)
 
+    # Обход закончен: теперь известно, сколько плейлистов разбирать.
+    # Дальше идём строго по одному — следующий после предыдущего.
+    if job is not None:
+        job.total = len(files)
+        job.stage = "playlists"
+        job.items = [
+            _import_item(str(path), importer.playlist_name(path)) for path in files
+        ]
+
     plans = []
-    for file_path in files:
+    for index, file_path in enumerate(files):
         plan = importer.PlaylistPlan(
             path=str(file_path), name=importer.playlist_name(file_path)
         )
+        if job is not None:
+            job.current = plan.name
+            job.items[index].state = "parsing"
         entries, error = importer.read_playlist(file_path, music_root)
         if error:
             plan.error = error
             plans.append(plan)
+            if job is not None:
+                job.items[index].state = "error"
+                job.items[index].error = error
+                job.done = index + 1
             continue
         plan.total = len(entries)
+        if job is not None:
+            job.items[index].state = "matching"
+            job.items[index].total = len(entries)
         matched, unmatched = await importer.match_entries(
             entries,
             music_root=music_root,
@@ -1264,6 +1292,10 @@ async def _build_plans(
         plan.resolutions = matched
         plan.unmatched = unmatched
         plans.append(plan)
+        if job is not None:
+            job.items[index].state = "done"
+            job.items[index].matched = plan.matched_count
+            job.done = index + 1
 
     plans, name_warnings = _dedupe_plans(plans)
     warnings.extend(name_warnings)
@@ -1342,6 +1374,58 @@ async def check_playlists_dir(
                 "message": f"Найдено плейлистов: {len(files)}"})
 
 
+# Фоновые задачи импорта m3u. Разбор папки на большой библиотеке идёт минутами,
+# поэтому он вынесен в задачу: интерфейс опрашивает прогресс, а не ждёт ответа.
+IMPORT_JOBS = ImportJobs()
+# Ссылки на задачи держим: иначе asyncio может собрать их раньше времени.
+_IMPORT_TASKS: set[asyncio.Task] = set()
+
+
+@router.post("/playlists/import/start")
+async def start_playlist_import(
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(csrf_protected),
+) -> JSONResponse:
+    """Запускает разбор папки в фоне и сразу отдаёт id задачи.
+
+    Дальше интерфейс опрашивает GET /playlists/import/jobs/{id}: там общий этап
+    и состояние каждого плейлиста. Ничего не пишет в БД.
+    """
+    body = await _json_body(request)
+    dir_override = body.get("dir")
+
+    job = IMPORT_JOBS.new()
+
+    async def runner() -> None:
+        await run_import(
+            job,
+            build_plans=lambda *, dir_override, job: _build_plans(
+                ctx, dir_override=dir_override, job=job
+            ),
+            dir_override=dir_override,
+            visible_playlists=lambda: ctx.playlists.list_visible(session.user.id),
+        )
+
+    task = asyncio.create_task(runner(), name=f"import-{job.id}")
+    _IMPORT_TASKS.add(task)
+    task.add_done_callback(_IMPORT_TASKS.discard)
+    return _ok(job.as_dict(), status_code=202)
+
+
+@router.get("/playlists/import/jobs/{job_id}")
+async def playlist_import_progress(
+    job_id: str,
+    ctx: AppContext = Depends(get_ctx),
+    session: SessionRecord = Depends(current_session),
+) -> JSONResponse:
+    """Прогресс импорта: общий этап и состояние каждого плейлиста."""
+    job = IMPORT_JOBS.get(job_id)
+    if job is None:
+        return _fail("Задача импорта не найдена или устарела. Запустите импорт заново.", 404)
+    return _ok(job.as_dict())
+
+
 @router.get("/playlists/import/preview")
 async def preview_playlist_import(
     request: Request,
@@ -1407,12 +1491,19 @@ async def apply_playlist_import(
     if not isinstance(items, list) or not items:
         return _fail("Ожидался список items")
 
-    try:
-        plans, _warnings, _params = await _build_plans(
-            ctx, dir_override=body.get("dir")
-        )
-    except importer.ImportError_ as exc:
-        return _fail(str(exc))
+    # Планы берём из задачи импорта, если интерфейс её передал: повторный разбор
+    # папки на большой библиотеке — это ещё раз те же минуты ожидания.
+    job_id = str(body.get("job_id") or "")
+    job = IMPORT_JOBS.get(job_id) if job_id else None
+    if job is not None and job.plans:
+        plans = job.plans
+    else:
+        try:
+            plans, _warnings, _params = await _build_plans(
+                ctx, dir_override=body.get("dir")
+            )
+        except importer.ImportError_ as exc:
+            return _fail(str(exc))
 
     plan_by_path = {plan.path: plan for plan in plans}
     results: list[dict] = []

@@ -453,21 +453,101 @@ async function renderImport(view) {
     });
   };
 
+  // Импорт: разбор идёт фоновой задачей, интерфейс опрашивает прогресс.
+  //
+  // Раньше здесь был один синхронный запрос: пока шёл разбор, на экране висело
+  // «Разбираю папку…» без единой цифры. На большой библиотеке это минуты, и
+  // выглядело как зависание. Теперь сверху общий прогресс, ниже — по плейлистам.
+  let pollTimer = null;
+  let currentJobId = null;
+
+  const stopPolling = () => {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  };
+
+  const drawProgress = (job) => {
+    const stageText = {
+      walk: 'Обход папки',
+      playlists: `Разбор плейлистов ${job.done} из ${job.total}`,
+      done: 'Готово',
+      error: 'Ошибка',
+    }[job.stage] || job.stage;
+
+    const bar = el('div', { class: 'progress' },
+      el('div', { class: 'progress-fill running', style: `width:${job.percent}%` }));
+
+    // Строки по каждому плейлисту: жёлтый вопрос — ещё не обработан,
+    // далее «разбираю»/«сопоставляю», в конце галочка или крестик.
+    const rows = (job.items || []).map((item) => {
+      const cls = item.state === 'done' ? 'created'
+        : item.state === 'error' ? 'error' : 'pending';
+      const label = item.state === 'error' ? item.error
+        : item.state === 'done' ? `${item.matched} из ${item.total} треков`
+        : item.state === 'parsing' ? 'Разбираю…'
+        : item.state === 'matching' ? 'Сопоставляю…'
+        : 'В очереди';
+      return el('div', { class: 'import-card' },
+        el('div', { class: 'row' },
+          el('span', { class: `import-status ${cls}`,
+                       title: item.state === 'done' ? 'Готово'
+                            : item.state === 'error' ? 'Ошибка' : 'Ещё не обработан' }, ''),
+          el('div', { class: 'track-main' },
+            el('strong', { class: 'ellipsis' }, item.name),
+            el('span', { class: 'muted tiny ellipsis' }, label),
+          ),
+        ),
+      );
+    });
+
+    return [
+      el('div', { class: 'import-progress' },
+        el('div', { class: 'row' },
+          el('span', { class: 'small' }, `${stageText} · ${job.percent}%`),
+          job.current ? el('span', { class: 'muted small ellipsis' }, job.current) : null,
+        ),
+        bar,
+      ),
+      rows.length ? el('div', { class: 'import-list' }, ...rows) : null,
+    ].filter(Boolean);
+  };
+
   const previewButton = el('button', {
     class: 'primary',
     onclick: async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
-      fill(result, el('p', { class: 'muted' }, 'Разбираю папку…'));
+      stopPolling();
+      fill(result, el('p', { class: 'muted' }, 'Запускаю разбор…'));
       try {
         await saveSettings();
-        const data = await api(
-          `/api/web/playlists/import/preview?dir=${encodeURIComponent(dirInput.value.trim())}`
-        );
-        renderPreview(result, data, dirInput.value.trim());
+        const job = await api('/api/web/playlists/import/start', {
+          method: 'POST',
+          body: JSON.stringify({ dir: dirInput.value.trim() }),
+        });
+        currentJobId = job.id;
+        fill(result, ...drawProgress(job));
+
+        pollTimer = setInterval(async () => {
+          try {
+            const state = await api(`/api/web/playlists/import/jobs/${job.id}`);
+            fill(result, ...drawProgress(state));
+            if (state.state === 'done') {
+              stopPolling();
+              renderPreview(result, state.result, dirInput.value.trim(), job.id);
+              button.disabled = false;
+            } else if (state.state === 'error') {
+              stopPolling();
+              fill(result, el('p', { class: 'error' }, state.error || 'разбор не удался'));
+              button.disabled = false;
+            }
+          } catch (error) {
+            stopPolling();
+            fill(result, el('p', { class: 'error' }, error.message));
+            button.disabled = false;
+          }
+        }, 700);
       } catch (error) {
         fill(result, el('p', { class: 'error' }, error.message));
-      } finally {
         button.disabled = false;
       }
     },
@@ -490,7 +570,7 @@ async function renderImport(view) {
   );
 }
 
-function renderPreview(container, data, dir) {
+function renderPreview(container, data, dir, jobId = null) {
   const playlists = data.playlists || [];
   if (!playlists.length) {
     fill(container, el('p', { class: 'muted' }, 'Плейлистов не найдено'));
@@ -515,7 +595,8 @@ function renderPreview(container, data, dir) {
 
   const rows = playlists.map((pl) => {
     const decision = decisions.get(pl.path);
-    const statusIcon = el('span', { class: 'import-status' }, '');
+    // «Ещё не обработан» — жёлтый знак вопроса (CSS .import-status.pending).
+    const statusIcon = el('span', { class: 'import-status pending', title: 'Ещё не обработан' }, '');
     const statusText = el('span', { class: 'muted small' }, '');
 
     const actionSelect = el('select', {
@@ -575,18 +656,17 @@ function renderPreview(container, data, dir) {
         statusIcon,
         el('div', { class: 'track-main' },
           el('strong', { class: 'ellipsis' }, pl.name),
-          el('span', { class: 'muted tiny ellipsis' }, pl.path),
+          // Метаданные в одну строку с путём: карточка ниже, читается так же.
+          el('span', { class: 'muted tiny ellipsis' },
+            pl.error
+              ? pl.error
+              : `${pl.matched} из ${pl.total} треков` +
+                (pl.existing_id ? ` · уже есть: ${pl.existing_count}` : '') +
+                ` · ${pl.path}`),
         ),
         statusText,
       ),
-      pl.error
-        ? el('p', { class: 'error small' }, pl.error)
-        : el('div', { class: 'row' },
-            el('span', { class: 'small' },
-              `треков ${pl.matched} из ${pl.total}` +
-              (pl.existing_id ? ` · уже есть: ${pl.existing_count}` : '')),
-          ),
-      el('div', { class: 'row' },
+      pl.error ? null : el('div', { class: 'row import-controls' },
         el('label', { class: 'inline' }, 'Действие'), actionSelect,
         el('label', { class: 'inline' }, publicBox, 'публичный'),
       ),
@@ -603,11 +683,17 @@ function renderPreview(container, data, dir) {
       const cards = [...container.querySelectorAll('.import-card')];
       cards.forEach((card) => {
         const icon = card.querySelector('.import-status');
-        if (icon) icon.textContent = '…';
+        if (icon) {
+          icon.className = 'import-status pending';
+          icon.title = 'Обрабатывается';
+          icon.textContent = '';
+        }
       });
 
       const payload = {
         dir,
+        // job_id: применяем уже разобранные планы, не разбирая папку заново.
+        job_id: jobId,
         items: playlists.map((pl) => ({
           path: pl.path,
           ...decisions.get(pl.path),
