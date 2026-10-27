@@ -644,3 +644,152 @@ async def test_id_param_has_no_default_ceiling():
     # Минимум и значения по умолчанию на месте.
     assert _int_param(None, default=0, name="id") == 0
     assert _int_param("-5", default=0, name="id", minimum=1) == 1
+
+
+# ----------------------------------------------------------------------
+# Раздел «Исполнители»: методы, которые клиенты вызывают при его открытии
+#
+# Был баг: getMusicDirectory и getArtistInfo2 не были реализованы и отдавали
+# 404 в формате FastAPI ({"detail": "Not Found"}). Клиент показывал пустой
+# раздел, хотя альбомы и плейлисты работали.
+# ----------------------------------------------------------------------
+async def test_get_music_directory_returns_album_tracks(api):
+    client, app = api
+    ctx = app.state.ctx
+    from tests.conftest import make_mp3
+    from mutagen.id3 import ID3, ID3NoHeaderError, TALB, TIT2, TPE1
+
+    path = make_mp3(ctx.settings.music_dir / "a" / "1.mp3", seconds=0.2)
+    try:
+        tags = ID3(str(path))
+    except ID3NoHeaderError:
+        tags = ID3()
+    tags.add(TIT2(encoding=3, text="D1"))
+    tags.add(TPE1(encoding=3, text="Dir Artist"))
+    tags.add(TALB(encoding=3, text="Dir Album"))
+    tags.save(str(path))
+    await ctx.scanner.scan(mode="full")
+
+    album_id = int(await ctx.music_db.fetch_value("SELECT id FROM albums LIMIT 1"))
+    r = await client.get(
+        "/rest/getMusicDirectory.view", params={**auth_params(), "id": str(album_id)}
+    )
+    assert r.status_code == 200
+    body = r.json()["subsonic-response"]
+    assert body["status"] == "ok", body
+    directory = body["directory"]
+    assert directory["name"] == "Dir Album"
+    assert directory["child"], "у альбома должны быть треки"
+    assert directory["child"][0]["title"] == "D1"
+
+
+async def test_get_music_directory_returns_artist_albums(api):
+    client, app = api
+    ctx = app.state.ctx
+    from tests.conftest import make_mp3, tag_mp3
+
+    path = make_mp3(ctx.settings.music_dir / "b" / "1.mp3", seconds=0.2)
+    tag_mp3(path, title="A1", artist="Folder Artist", album="Folder Album")
+    await ctx.scanner.scan(mode="full")
+
+    # Так же, как клиент: сначала getIndexes, из него id папки, потом обход.
+    idx = await client.get("/rest/getIndexes.view", params=auth_params())
+    index = idx.json()["subsonic-response"]["indexes"]["index"]
+    folder = next(
+        artist
+        for group in index
+        for artist in group["artist"]
+        if artist["name"] == "Folder Artist"
+    )
+    r = await client.get(
+        "/rest/getMusicDirectory.view", params={**auth_params(), "id": folder["id"]}
+    )
+    body = r.json()["subsonic-response"]
+    assert body["status"] == "ok", body
+    children = body["directory"]["child"]
+    assert children and children[0]["isDir"] is True
+    assert children[0]["title"] == "Folder Album"
+
+    # Второй шаг обхода: папка альбома отдаёт треки.
+    tracks = await client.get(
+        "/rest/getMusicDirectory.view",
+        params={**auth_params(), "id": children[0]["id"]},
+    )
+    track_body = tracks.json()["subsonic-response"]
+    assert track_body["status"] == "ok", track_body
+    assert track_body["directory"]["child"][0]["title"] == "A1"
+
+
+async def test_get_music_directory_unknown_id_is_subsonic_error(api):
+    client, app = api
+    await app.state.ctx.scanner.scan(mode="full")
+    r = await client.get(
+        "/rest/getMusicDirectory.view", params={**auth_params(), "id": "999999"}
+    )
+    # Ответ Subsonic (HTTP 200, code 70), а не 404 от FastAPI.
+    assert r.status_code == 200
+    body = r.json()["subsonic-response"]
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == 70
+
+
+async def test_get_artist_info2_is_not_404(api):
+    """Клиенты вызывают его при открытии исполнителя: 404 ломает раздел."""
+    client, app = api
+    await app.state.ctx.scanner.scan(mode="full")
+    for method in ("getArtistInfo2", "getArtistInfo"):
+        r = await client.get(
+            f"/rest/{method}.view", params={**auth_params(), "id": "1"}
+        )
+        assert r.status_code == 200, (method, r.text)
+        body = r.json()["subsonic-response"]
+        assert body["status"] == "ok", (method, body)
+
+
+async def test_methods_without_data_return_valid_subsonic_envelope(api):
+    """getTopSongs, getLyrics и подобные: пустой ответ вместо 404 FastAPI."""
+    client, app = api
+    await app.state.ctx.scanner.scan(mode="full")
+    for method in (
+        "getTopSongs", "getSimilarSongs", "getLyrics", "getRandomSongs",
+        "getAlbumInfo2", "getBookmarks", "getShares",
+    ):
+        r = await client.get(f"/rest/{method}.view", params={**auth_params(), "id": "1"})
+        assert r.status_code == 200, method
+        body = r.json()["subsonic-response"]
+        assert body["status"] == "ok", (method, body)
+        assert body["type"] == "mtr"
+
+
+async def test_cover_art_still_works_alongside_new_methods(api):
+    """Регрессия: перехват /rest/* перекрывал getCoverArt из отдельного роутера."""
+    import io
+
+    from PIL import Image
+    from mutagen.id3 import APIC, ID3, ID3NoHeaderError, TALB, TIT2, TPE1
+
+    from tests.conftest import make_mp3
+
+    client, app = api
+    ctx = app.state.ctx
+    path = make_mp3(ctx.settings.music_dir / "c" / "1.mp3", seconds=0.2)
+    buf = io.BytesIO()
+    Image.new("RGB", (700, 700), (20, 90, 160)).save(buf, "JPEG", quality=90)
+    try:
+        tags = ID3(str(path))
+    except ID3NoHeaderError:
+        tags = ID3()
+    tags.add(TIT2(encoding=3, text="C1"))
+    tags.add(TPE1(encoding=3, text="Cover Artist"))
+    tags.add(TALB(encoding=3, text="Cover Album"))
+    tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="", data=buf.getvalue()))
+    tags.save(str(path))
+    await ctx.scanner.scan(mode="full")
+
+    album_id = int(await ctx.music_db.fetch_value("SELECT id FROM albums LIMIT 1"))
+    r = await client.get(
+        "/rest/getCoverArt.view", params={**auth_params(), "id": f"al-{album_id}"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("image/")
+    assert len(r.content) > 1000
