@@ -558,3 +558,89 @@ async def test_max_bit_rate_forces_downscale(api, music_dir):
     )
     assert r.status_code == 200
     assert r.headers["X-MTR-Format"] == "mp3_128"
+
+
+# ----------------------------------------------------------------------
+# Идентификаторы больше 10 000
+#
+# Был баг: _int_param обрезал любой id до 10 000 (max(minimum, min(parsed, 10_000))).
+# Все треки с id > 10000 превращались в 10000, из-за чего в клиенте они «слипались»
+# в один и тот же трек. Здесь проверяем, что id проходит без искажений.
+# ----------------------------------------------------------------------
+async def test_high_track_id_is_not_clipped(api):
+    client, app = api
+    ctx = app.state.ctx
+    # Сдвигаем счётчик: следующий трек получит id заметно выше 10 000.
+    await ctx.music_db.execute(
+        "INSERT INTO sqlite_sequence (name, seq) VALUES ('tracks', 10500)"
+    )
+    now = "2026-01-01T00:00:00Z"
+    await ctx.music_db.execute(
+        "INSERT INTO tracks (path, filename, title, album_id, missing, "
+        "duration_ms, added_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+        ("/music/high.mp3", "high.mp3", "High ID", None, 0, 1000, now, now),
+    )
+    real_id = int(await ctx.music_db.fetch_value("SELECT MAX(id) FROM tracks"))
+    assert real_id > 10_000, real_id
+
+    r = await client.get(
+        "/rest/getSong.view", params={**auth_params(), "id": str(real_id)}
+    )
+    assert r.status_code == 200
+    song = r.json()["subsonic-response"]["song"]
+    # Тот же трек, а не «10000».
+    assert song["id"] == str(real_id)
+    assert song["title"] == "High ID"
+
+
+async def test_high_album_and_artist_ids_are_not_clipped(api):
+    client, app = api
+    ctx = app.state.ctx
+    ctx_music = ctx.music_db
+    await ctx_music.execute(
+        "INSERT INTO sqlite_sequence (name, seq) VALUES ('artists', 20000)"
+    )
+    await ctx_music.execute(
+        "INSERT INTO sqlite_sequence (name, seq) VALUES ('albums', 30000)"
+    )
+    now = "2026-01-01T00:00:00Z"
+    await ctx_music.execute(
+        "INSERT INTO artists (name, created_at, updated_at) VALUES ('Big Artist',?,?)",
+        (now, now),
+    )
+    artist_id = int(await ctx_music.fetch_value("SELECT MAX(id) FROM artists"))
+    await ctx_music.execute(
+        "INSERT INTO albums (name, artist_id, created_at, updated_at) VALUES ('Big Album',?,?,?)",
+        (artist_id, now, now),
+    )
+    album_id = int(await ctx_music.fetch_value("SELECT MAX(id) FROM albums"))
+    await ctx_music.execute(
+        "INSERT INTO tracks (path, filename, title, album_id, missing, "
+        "duration_ms, added_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+        ("/music/big.mp3", "big.mp3", "Big Track", album_id, 0, 1000, now, now),
+    )
+
+    r = await client.get(
+        "/rest/getArtist.view", params={**auth_params(), "id": str(artist_id)}
+    )
+    assert r.status_code == 200
+    assert r.json()["subsonic-response"]["artist"]["id"] == str(artist_id)
+
+    r = await client.get(
+        "/rest/getAlbum.view", params={**auth_params(), "id": str(album_id)}
+    )
+    assert r.status_code == 200
+    assert r.json()["subsonic-response"]["album"]["id"] == str(album_id)
+
+
+async def test_id_param_has_no_default_ceiling():
+    """Потолок применяется только там, где передан явно (size, offset, *_count)."""
+    from app.subsonic.router import _int_param
+
+    assert _int_param("123456", default=0, name="id", minimum=1) == 123456
+    assert _int_param(str(2**31), default=0, name="id", minimum=1) == 2**31
+    # Явный потолок продолжает работать — он нужен для размеров выборок.
+    assert _int_param("9999", default=10, name="size", maximum=500) == 500
+    # Минимум и значения по умолчанию на месте.
+    assert _int_param(None, default=0, name="id") == 0
+    assert _int_param("-5", default=0, name="id", minimum=1) == 1

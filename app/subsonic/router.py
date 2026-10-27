@@ -61,9 +61,17 @@ def _api(auth: AuthContext) -> str:
 
 
 def _int_param(
-    value: str | None, *, default: int, name: str, minimum: int = 0, maximum: int = 10_000
+    value: str | None, *, default: int, name: str, minimum: int = 0,
+    maximum: int | None = None,
 ) -> int:
-    """Разбор целочисленного query-параметра с понятной ошибкой."""
+    """Разбор целочисленного query-параметра с понятной ошибкой.
+
+    Потолок (``maximum``) по умолчанию НЕ применяется. Раньше здесь стояло
+    10 000, и оно молча обрезало идентификаторы: любой трек с id > 10000
+    превращался в 10000, из-за чего все файлы «сверх лимита» слипались в один
+    и тот же трек. Ограничивать имеет смысл только размеры выборок (size,
+    offset, *_count), и там ``maximum`` передаётся явно.
+    """
     if value is None or not str(value).strip():
         return default
     try:
@@ -72,7 +80,11 @@ def _int_param(
         raise SubsonicError(
             ErrorCode.GENERIC, f"Invalid value for parameter {name}: {value!r}"
         ) from exc
-    return max(minimum, min(parsed, maximum))
+    if parsed < minimum:
+        return minimum
+    if maximum is not None and parsed > maximum:
+        return maximum
+    return parsed
 
 
 def _register(method: str, *paths: str) -> Callable:
@@ -438,9 +450,16 @@ async def search_legacy(
             {"searchResult": {"match": []}}, api_version=_api(auth)
         )
 
-    limit_artists = _int_param(artistCount, default=20, name="artistCount")
-    limit_albums = _int_param(albumCount, default=20, name="albumCount")
-    limit_songs = _int_param(songCount, default=DEFAULT_SEARCH_SONGS, name="songCount")
+    limit_artists = _int_param(
+        artistCount, default=20, name="artistCount", maximum=MAX_SEARCH_COUNT
+    )
+    limit_albums = _int_param(
+        albumCount, default=20, name="albumCount", maximum=MAX_SEARCH_COUNT
+    )
+    limit_songs = _int_param(
+        songCount, default=DEFAULT_SEARCH_SONGS, name="songCount",
+        maximum=MAX_SEARCH_COUNT,
+    )
 
     artists = await lib.search_artists(text, limit=limit_artists) if limit_artists else []
     albums = await lib.search_albums(text, limit=limit_albums) if limit_albums else []
