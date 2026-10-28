@@ -690,3 +690,10 @@ class TrackRepository:
                 "updated_at = excluded.updated_at",
                 (track_id, played_at, played_at),
             )
+
+
+async def _optimize(self) -> None:  # pragma: no cover - тонкая обёртка над Database
+    await self._db.optimize()
+
+
+TrackRepository.optimize = _optimize

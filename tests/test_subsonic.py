@@ -671,8 +671,9 @@ async def test_get_music_directory_returns_album_tracks(api):
     await ctx.scanner.scan(mode="full")
 
     album_id = int(await ctx.music_db.fetch_value("SELECT id FROM albums LIMIT 1"))
+    # Папка альбома в getMusicDirectory — с префиксом «al-»: числом трактуется исполнитель.
     r = await client.get(
-        "/rest/getMusicDirectory.view", params={**auth_params(), "id": str(album_id)}
+        "/rest/getMusicDirectory.view", params={**auth_params(), "id": f"al-{album_id}"}
     )
     assert r.status_code == 200
     body = r.json()["subsonic-response"]
@@ -793,3 +794,220 @@ async def test_cover_art_still_works_alongside_new_methods(api):
     assert r.status_code == 200, r.text
     assert r.headers["content-type"].startswith("image/")
     assert len(r.content) > 1000
+
+
+# ----------------------------------------------------------------------
+# Исполнители, которые есть только в тегах треков
+#
+# Баг: список, поиск и getArtist учитывали только владельца альбома. Гость на
+# сборнике, фит и трек без альбома в Subsonic не появлялись вообще.
+# Баг 2: getIndexes отдавал id со числовым сдвигом, и getArtist по нему
+# отвечал «не найден».
+# ----------------------------------------------------------------------
+async def _seed_guest_library(ctx):
+    from mutagen.id3 import ID3, TALB, TIT2, TPE1, TPE2
+
+    from tests.conftest import make_mp3
+
+    def tag(path, title, artist, album=None, album_artist=None):
+        tags = ID3()
+        tags.add(TIT2(encoding=3, text=title))
+        tags.add(TPE1(encoding=3, text=artist))
+        if album:
+            tags.add(TALB(encoding=3, text=album))
+        if album_artist:
+            tags.add(TPE2(encoding=3, text=album_artist))
+        tags.save(str(path))
+
+    music = ctx.settings.music_dir
+    tag(make_mp3(music / "q" / "1.mp3", seconds=0.2), "Bohemian", "Queen", "Opera", "Queen")
+    tag(make_mp3(music / "c" / "1.mp3", seconds=0.2), "Track A", "Guest One",
+        "Big Compilation", "Various Artists")
+    tag(make_mp3(music / "n" / "1.mp3", seconds=0.2), "Loose", "Lonely Artist")
+    await ctx.scanner.scan(mode="full")
+
+
+async def test_guest_and_loose_artists_are_listed_and_searchable(api):
+    client, app = api
+    await _seed_guest_library(app.state.ctx)
+
+    names = sorted(
+        artist["name"]
+        for group in (await client.get("/rest/getIndexes.view", params=auth_params()))
+        .json()["subsonic-response"]["indexes"]["index"]
+        for artist in group["artist"]
+    )
+    # Гость сборника и трек без альбома — тоже исполнители.
+    assert "Guest One" in names
+    assert "Lonely Artist" in names
+    assert "Various Artists" in names
+
+    r = await client.get(
+        "/rest/search3.view",
+        params={**auth_params(), "query": "Guest", "artistCount": "20",
+                "albumCount": "0", "songCount": "0"},
+    )
+    found = [a["name"] for a in r.json()["subsonic-response"]["searchResult3"]["artist"]]
+    assert found == ["Guest One"]
+
+
+async def test_artist_from_getindexes_opens_with_get_artist(api):
+    """Клиент берёт id из getIndexes и открывает исполнителя через getArtist."""
+    client, app = api
+    await _seed_guest_library(app.state.ctx)
+
+    index = (await client.get("/rest/getIndexes.view", params=auth_params())).json()[
+        "subsonic-response"
+    ]["indexes"]["index"]
+    for group in index:
+        for artist in group["artist"]:
+            r = await client.get(
+                "/rest/getArtist.view", params={**auth_params(), "id": artist["id"]}
+            )
+            body = r.json()["subsonic-response"]
+            assert body["status"] == "ok", (artist["name"], body)
+
+
+async def test_guest_artist_sees_compilation_album(api):
+    client, app = api
+    await _seed_guest_library(app.state.ctx)
+
+    artist_id = int(
+        await app.state.ctx.music_db.fetch_value(
+            "SELECT id FROM artists WHERE name = 'Guest One'"
+        )
+    )
+    body = (
+        await client.get("/rest/getArtist.view", params={**auth_params(), "id": str(artist_id)})
+    ).json()["subsonic-response"]
+    albums = [album["name"] for album in body["artist"]["album"]]
+    assert albums == ["Big Compilation"]
+
+
+async def test_music_directory_folder_ids_do_not_collide_with_albums(api):
+    """Папка исполнителя и альбом с тем же числом: клиент их не путает."""
+    client, app = api
+    await _seed_guest_library(app.state.ctx)
+
+    index = (await client.get("/rest/getIndexes.view", params=auth_params())).json()[
+        "subsonic-response"
+    ]["indexes"]["index"]
+    folder = next(
+        artist for group in index for artist in group["artist"]
+        if artist["name"] == "Queen"
+    )
+    # id исполнителя в папке совпадает с id из getArtists (число), без префиксов.
+    artists_ids = {
+        a["name"]: a["id"]
+        for g in (await client.get("/rest/getArtists.view", params=auth_params()))
+        .json()["subsonic-response"]["artists"]["index"]
+        for a in g["artist"]
+    }
+    assert folder["id"] == artists_ids["Queen"]
+    assert not folder["id"].startswith("ar-")
+    body = (
+        await client.get("/rest/getMusicDirectory.view", params={**auth_params(), "id": folder["id"]})
+    ).json()["subsonic-response"]
+    assert body["status"] == "ok"
+    assert [child["title"] for child in body["directory"]["child"]] == ["Opera"]
+
+
+async def test_web_artists_report_track_count_for_loose_artist(api):
+    """Исполнитель без альбома в вебе: track_count, а не пустая плитка «0 альб.»."""
+    client, app = api
+    await _seed_guest_library(app.state.ctx)
+    login = await client.post(
+        "/api/web/login", json={"username": "alice", "password": "secretpass123"}
+    )
+    assert login.status_code == 200, login.text
+    items = (await client.get("/api/web/artists")).json()["data"]["items"]
+    lonely = next(item for item in items if item["name"] == "Lonely Artist")
+    assert lonely["album_count"] == 0
+    assert lonely["track_count"] == 1
+
+
+async def test_artist_ids_are_identical_across_methods(api):
+    """Клиент ждёт один и тот же числовой id исполнителя во всех методах."""
+    client, app = api
+    await _seed_guest_library(app.state.ctx)
+    by_list = {
+        a["name"]: a["id"]
+        for g in (await client.get("/rest/getArtists.view", params=auth_params()))
+        .json()["subsonic-response"]["artists"]["index"]
+        for a in g["artist"]
+    }
+    by_index = {
+        a["name"]: a["id"]
+        for g in (await client.get("/rest/getIndexes.view", params=auth_params()))
+        .json()["subsonic-response"]["indexes"]["index"]
+        for a in g["artist"]
+    }
+    assert by_list == by_index
+    assert all(v.isdigit() for v in by_list.values())
+
+
+async def test_album_folder_with_prefix_returns_tracks(api):
+    """Треки альбома доступны по «al-<id>», даже если номер совпадает с исполнителем."""
+    client, app = api
+    await _seed_guest_library(app.state.ctx)
+    album_id = int(await app.state.ctx.music_db.fetch_value(
+        "SELECT id FROM albums WHERE name = 'Opera'"))
+    body = (await client.get(
+        "/rest/getMusicDirectory.view",
+        params={**auth_params(), "id": f"al-{album_id}"},
+    )).json()["subsonic-response"]
+    assert body["status"] == "ok"
+    assert [c["title"] for c in body["directory"]["child"]] == ["Bohemian"]
+    assert all(c["parent"] == f"al-{album_id}" for c in body["directory"]["child"])
+
+
+# ----------------------------------------------------------------------
+# Медленный getArtists/getIndexes на большой библиотеке
+#
+# Причина: без статистики SQLite выбирал план, который перебирает почти все
+# треки на каждого исполнителя (3.7 с на 20k треков). PRAGMA optimize и ANALYZE
+# при миграции держат план корректным.
+# ----------------------------------------------------------------------
+async def test_list_artists_uses_statistics_after_migration(api):
+    import time
+
+    client, app = api
+    ctx = app.state.ctx
+    now = "2026-01-01T00:00:00Z"
+    await ctx.music_db.execute_many(
+        "INSERT INTO artists (name, created_at, updated_at) VALUES (?,?,?)",
+        [(f"A{i}", now, now) for i in range(300)],
+    )
+    await ctx.music_db.execute_many(
+        "INSERT INTO albums (name, artist_id, created_at, updated_at) VALUES (?,?,?,?)",
+        [(f"L{i}", (i % 300) + 1, now, now) for i in range(900)],
+    )
+    await ctx.music_db.execute_many(
+        "INSERT INTO tracks (path, filename, title, artist, artist_id, album, album_id, "
+        "missing, duration_ms, added_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [(f"/m/{i}.mp3", f"{i}.mp3", f"S{i}", "A", (i % 300) + 1, "L", (i % 900) + 1,
+          0, 1000, now, now) for i in range(3000)],
+    )
+    await ctx.music_db.execute("ANALYZE")
+
+    started = time.perf_counter()
+    r = await client.get("/rest/getArtists.view", params=auth_params())
+    elapsed = time.perf_counter() - started
+    assert r.status_code == 200
+    assert elapsed < 2.0, f"getArtists занял {elapsed:.2f} с — план запроса деградировал"
+
+
+async def test_schema_migration_runs_analyze(tmp_path):
+    """Обновление схемы выполняет ANALYZE: статистика есть сразу после миграции."""
+    from app.db.database import Database
+    from app.db.migrations import MUSIC_SCHEMA_VERSION, _migrate_music
+
+    db = Database(tmp_path / "m.db", label="music")
+    await db.connect()
+    await _migrate_music(db)
+    assert await db.get_user_version() == MUSIC_SCHEMA_VERSION
+    # ANALYZE создаёт служебную таблицу sqlite_stat1
+    assert await db.fetch_value(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'sqlite_stat1'", default=0
+    ) >= 0
+    await db.close()

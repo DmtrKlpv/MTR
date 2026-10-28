@@ -215,7 +215,7 @@ async def test_cover_pass_waits_for_quiet_and_is_capped(tmp_path: Path):
     tracker.touch()
 
     class Covers:
-        async def pending_album_ids(self):
+        async def pending_album_ids(self, *, mode="incremental", limit=None):
             return [1]
 
         async def clear_absent_markers(self):

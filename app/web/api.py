@@ -1037,6 +1037,7 @@ async def list_artists(
     # альбома. Раньше это был отдельный запрос на каждого исполнителя —
     # на 5000 записей выходило 5000 обращений; теперь один запрос на страницу.
     album_map = await ctx.library.artist_album_map([artist.id for artist in rows])
+    track_counts = await ctx.library.artist_track_counts([artist.id for artist in rows])
     return _ok(
         {
             "items": [
@@ -1044,6 +1045,7 @@ async def list_artists(
                     "id": artist.id,
                     "name": artist.name,
                     "album_count": artist.album_count,
+                    "track_count": track_counts.get(artist.id, 0),
                     "album_id": album_map.get(artist.id),
                 }
                 for artist in rows

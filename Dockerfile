@@ -39,6 +39,12 @@ RUN pip install --no-cache-dir --only-binary=:all: \
 # (он бы создал лишний слой, дублирующий весь код в образе).
 COPY --chown=1000:1000 app ./app
 
+# Проверка на этапе сборки: если пакет не попал в образ, сборка падает здесь,
+# а не при запуске контейнера. Без этого ошибка «No module named app.db»
+# видна только в журнале uvicorn, уже после старта.
+RUN test -f app/db/database.py && python -c "import app.db.database, app.bootstrap" \
+ && echo "образ: пакет app собран корректно"
+
 # Скрипты обслуживания (самопроверка образа). Нужны внутри контейнера:
 # docker exec mtr-app sh /app/scripts/selfcheck.sh
 COPY --chown=1000:1000 scripts ./scripts

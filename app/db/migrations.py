@@ -26,7 +26,7 @@ SCHEMA_DIR = Path(__file__).resolve().parent
 SCHEMA_VERSION = 2
 # У музыкальной базы своя версия: она меняется чаще, и поднимать из-за этого
 # версию пользовательской базы (с паролями и сессиями) незачем.
-MUSIC_SCHEMA_VERSION = 5
+MUSIC_SCHEMA_VERSION = 6
 
 # v2: сессии веб-интерфейса. В v1 таблица sessions уже есть, но хранит
 # открытый id и не умеет CSRF. Миграция перестраивает её:
@@ -150,6 +150,14 @@ async def _migrate_music(db: Database) -> None:
     if current < 5:
         logger.info("mtr_music.db: применяю миграцию v5 (очередь команд worker)")
         await db.executescript(MIGRATION_MUSIC_V5_WORKER)
+
+    # Статистика для планировщика SQLite. Без неё план запросов по исполнителям
+    # выбирается вслепую: индекс tracks(missing) с двумя значениями кажется
+    # селективным, и каждый запрос перебирает почти всю таблицу треков.
+    # Замер: list_artists на 20k треков — 3.7 с без статистики, 23 мс с ней.
+    # ANALYZE один раз при обновлении схемы; дальше PRAGMA optimize держит статистику.
+    if current < MUSIC_SCHEMA_VERSION:
+        await db.execute("ANALYZE")
 
     await db.set_user_version(MUSIC_SCHEMA_VERSION)
     logger.info("mtr_music.db готова, версия схемы %d", MUSIC_SCHEMA_VERSION)

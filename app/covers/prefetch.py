@@ -125,7 +125,7 @@ class CoverPass:
             if mode == "full":
                 cleared = await self._covers.clear_absent_markers()
                 logger.info("полный скан: снято маркеров отсутствия обложек: %d", cleared)
-            pending = await self._covers.pending_album_ids()
+            pending = await self._covers.pending_album_ids(mode=mode)
             self.total = len(pending)
             for album_id in pending:
                 if self._cancel:

@@ -24,7 +24,7 @@ from app.audio.ffmpeg import TranscodeBusy, TranscodeError
 from app.audio.profiles import ProfileError
 from app.audio.service import SourceMissing, TrackNotFound, parse_offset
 from app.bootstrap import AppContext
-from app.repositories.library import ArtistRow, LibraryRepository
+from app.repositories.library import LibraryRepository
 from app.subsonic import format as fmt
 from app.subsonic import playlists_api as pl
 from app.subsonic.auth import AuthContext
@@ -44,15 +44,16 @@ router = APIRouter(prefix="/rest", tags=["subsonic"])
 DEFAULT_SEARCH_SONGS = 50
 MAX_SEARCH_COUNT = 500
 
-# Папки исполнителей в старом ID3-режиме (getIndexes → getMusicDirectory).
+# Папки в старом ID3-режиме (getIndexes → getMusicDirectory).
 #
-# У нас плоская библиотека, и id исполнителя с id альбома лежат в одном числовом
-# пространстве: исполнитель 1 и альбом 1 — разные сущности с одинаковым числом.
-# Клиент, обходящий папки, присылает только число и отличить их не может.
-# Поэтому getIndexes отдаёт id исполнителей со сдвигом в этот диапазон, а
-# getMusicDirectory по нему понимает, что просят альбомы исполнителя.
-# Обычные id (меньше смещения) трактуются как альбомы — как и раньше.
-FOLDER_ARTIST_OFFSET = 1_000_000_000
+# id исполнителей здесь ТЕ ЖЕ, что в getArtists и getArtist: числа. Клиент
+# ожидает один и тот же id исполнителя во всех методах.
+#
+# Конфликт: исполнитель 1 и альбом 1 — разные сущности с одним числом. Поэтому
+# альбомы внутри папки исполнителя (и треки внутри альбома) получают префикс
+# «al-<id>». Числовой id в getMusicDirectory означает исполнителя, если такой
+# есть, иначе альбом — как и раньше для клиентов, знающих id альбома из getAlbum.
+ALBUM_FOLDER_PREFIX = "al-"
 
 
 # ----------------------------------------------------------------------
@@ -278,22 +279,13 @@ async def get_indexes(
 ) -> JSONResponse:
     """Устаревший обход библиотеки. Оставлен для старых клиентов."""
     artists = await _library(request).list_artists()
-    # id со сдвигом: см. FOLDER_ARTIST_OFFSET. Иначе getMusicDirectory не отличит
-    # папку исполнителя от альбома с тем же номером.
-    folders = [
-        ArtistRow(
-            id=artist.id + FOLDER_ARTIST_OFFSET,
-            name=artist.name,
-            album_count=artist.album_count,
-        )
-        for artist in artists
-    ]
+    index = fmt.legacy_index_json(artists)
     return ok_response(
         {
             "indexes": {
                 "lastModified": _ctx(request).settings.subsonic_api_version,
                 "ignoredArticles": "",
-                "index": fmt.legacy_index_json(folders),
+                "index": index,
             }
         },
         api_version=_api(auth),
@@ -306,73 +298,73 @@ async def get_music_directory(
     auth: AuthContext = Depends(require_auth),
     id: str | None = Query(None),
 ) -> JSONResponse:
-    """Обход по «папкам»: старый ID3-режим Subsonic.
+    """Обход по «папкам»: исполнитель → альбомы → треки.
 
-    Раньше метода не было вовсе, и клиент получал 404 в формате FastAPI.
-    Часть клиентов (в том числе приложения, открывающие «Исполнители» через
-    папки, а не через getArtists) на этом ломается и показывает пустой список.
-
-    Папки у нас виртуальные: id исполнителя отдаёт альбомы-каталоги, id альбома —
-    треки. Это ровно то, что клиент ожидает от directory.
+    Папка исполнителя: числовой id (тот же, что в getArtists).
+    Папка альбома: «al-<id>» (внутри папки исполнителя) или числовой id.
     """
     if not id:
         raise missing("id")
-    entity_id = _int_param(id, default=0, name="id", minimum=1)
     lib = _library(request)
 
-    # id из getIndexes приходит со сдвигом — это папка исполнителя.
-    if entity_id >= FOLDER_ARTIST_OFFSET:
-        return await _artist_folder(request, auth, lib, entity_id - FOLDER_ARTIST_OFFSET)
+    if id.startswith(ALBUM_FOLDER_PREFIX):
+        album_id = _int_param(id[len(ALBUM_FOLDER_PREFIX):], default=0, name="id", minimum=1)
+        return await _album_folder(request, auth, lib, album_id)
 
-    # Обычный id — папка альбома с треками.
-    album = await lib.get_album(entity_id)
-    if album is not None:
-        tracks = await lib.album_tracks(entity_id)
-        children = [fmt.child_json(track) for track in tracks]
-        return ok_response(
-            {
-                "directory": {
-                    "id": str(entity_id),
-                    "name": album.name,
-                    "child": children,
-                }
-            },
-            api_version=_api(auth),
-        )
-
-    # Для полноты: если пришёл обычный id исполнителя (клиент взял его из
-    # getArtists), тоже отдаём альбомы.
+    entity_id = _int_param(id, default=0, name="id", minimum=1)
     if await lib.get_artist(entity_id) is not None:
         return await _artist_folder(request, auth, lib, entity_id)
+    return await _album_folder(request, auth, lib, entity_id)
 
-    raise SubsonicError(ErrorCode.NOT_FOUND, f"Folder {id} not found")
+
+async def _album_folder(
+    request: Request, auth: AuthContext, lib: LibraryRepository, album_id: int
+) -> JSONResponse:
+    """Папка альбома: его треки. parent у треков — «al-<id>», чтобы навигация не
+    путала альбом с исполнителем того же номера."""
+    album = await lib.get_album(album_id)
+    if album is None:
+        raise SubsonicError(ErrorCode.NOT_FOUND, f"Folder {album_id} not found")
+    children = []
+    for track in await lib.album_tracks(album_id):
+        child = fmt.child_json(track)
+        child["parent"] = f"{ALBUM_FOLDER_PREFIX}{album_id}"
+        children.append(child)
+    return ok_response(
+        {
+            "directory": {
+                "id": f"{ALBUM_FOLDER_PREFIX}{album_id}",
+                "name": album.name,
+                "child": children,
+            }
+        },
+        api_version=_api(auth),
+    )
 
 
 async def _artist_folder(
     request: Request, auth: AuthContext, lib: LibraryRepository, artist_id: int
 ) -> JSONResponse:
-    """Папка исполнителя: внутри его альбомы как вложенные папки."""
+    """Папка исполнителя: его альбомы как вложенные папки («al-<id>»)."""
     artist = await lib.get_artist(artist_id)
     if artist is None:
         raise SubsonicError(ErrorCode.NOT_FOUND, f"Artist folder {artist_id} not found")
-    albums = await lib.artist_albums(artist_id)
-    # id альбомов сдвиг НЕ получают: в getMusicDirectory по ним приходят за треками.
     children = [
         {
-            "id": str(item.id),
-            "parent": str(artist_id + FOLDER_ARTIST_OFFSET),
+            "id": f"{ALBUM_FOLDER_PREFIX}{item.id}",
+            "parent": str(artist_id),
             "isDir": True,
             "title": item.name,
             "album": item.name,
             "artist": artist.name,
             "year": item.year,
         }
-        for item in albums
+        for item in await lib.artist_albums(artist_id)
     ]
     return ok_response(
         {
             "directory": {
-                "id": str(artist_id + FOLDER_ARTIST_OFFSET),
+                "id": str(artist_id),
                 "name": artist.name,
                 "child": children,
             }

@@ -1342,8 +1342,8 @@ label.inline {
    Прокрутка ограничена: при массовом сбое строк бывают сотни. */
 .error-table-wrap {
   margin: 8px 0 4px;
-  max-height: 320px;
-  overflow: auto;
+  /* max-height: 320px;
+  overflow: auto; */
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }

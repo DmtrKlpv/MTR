@@ -733,7 +733,10 @@ async function renderArtistsInto(node) {
     },
       artistAvatar(artist),
       el('span', { class: 'artist-name' }, artist.name),
-      el('span', { class: 'artist-meta' }, `${artist.album_count} альб.`),
+      // Исполнитель без альбома (только треки, например гость или одиночный трек):
+      // подпись «N тр.» вместо «0 альб.», чтобы не выглядело как пустая плитка.
+      el('span', { class: 'artist-meta' },
+        artist.album_count ? `${artist.album_count} альб.` : `${artist.track_count ?? 0} тр.`),
     )));
 
     const shown = grid.childElementCount;

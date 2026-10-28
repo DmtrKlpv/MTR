@@ -382,6 +382,17 @@ class Database:
     # ------------------------------------------------------------------
     # Миграции
     # ------------------------------------------------------------------
+    async def optimize(self) -> None:
+        """Лёгкое обновление статистики планировщика (PRAGMA optimize).
+
+        Вызывается после записи больших объёмов (скан), чтобы планы запросов
+        не деградировали на растущей библиотеке. Ошибки не критичны.
+        """
+        try:
+            await self.execute("PRAGMA optimize")
+        except Exception:  # noqa: BLE001 - оптимизация не должна ронять запись
+            logger.debug("[%s] PRAGMA optimize не выполнен", self.label, exc_info=True)
+
     async def get_user_version(self) -> int:
         """Текущая версия схемы (PRAGMA user_version)."""
         return int(await self.fetch_value("PRAGMA user_version", default=0) or 0)

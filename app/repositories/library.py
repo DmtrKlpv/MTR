@@ -145,6 +145,27 @@ def _row_to_album(row: sqlite3.Row) -> AlbumRow:
     )
 
 
+# Связи «исполнитель — альбом» для разделов исполнителей.
+#
+# Исполнитель попадает в список, в поиск и в getArtist в двух случаях:
+#   1) он владелец альбома (albums.artist_id);
+#   2) у него есть живой трек (tracks.artist_id) — гость на сборнике,
+#      фит, трек без альбома.
+# Раньше учитывался только первый случай, и гости сборников, фиты и одиночные
+# треки не были видны вообще: их не находил поиск и не показывал список.
+_LIVE_LINKS = """
+WITH live_links AS (
+    SELECT t.artist_id AS artist_id, t.album_id AS album_id
+      FROM tracks t
+     WHERE t.missing = 0 AND t.artist_id IS NOT NULL
+    UNION
+    SELECT a.artist_id AS artist_id, a.id AS album_id
+      FROM albums a
+      JOIN tracks t ON t.album_id = a.id AND t.missing = 0
+     WHERE a.artist_id IS NOT NULL
+)
+"""
+
 class LibraryRepository:
     """Чтение альбомов, исполнителей и жанров."""
 
@@ -242,23 +263,21 @@ class LibraryRepository:
     async def list_artists(
         self, *, limit: int | None = None, offset: int = 0
     ) -> list[ArtistRow]:
-        """Исполнители хотя бы с одним непустым альбомом.
+        """Исполнители с хотя бы одним живым треком: владельцы и гости.
 
-        Список отдаётся страницами: у реальной библиотеки исполнителей тысячи,
-        и рисовать их все одним куском — это и запрос на тысячи строк, и
-        столько же узлов в DOM.
+        Страницы идут через LIMIT/OFFSET; агрегаты считаются одним проходом.
         """
-        # Один проход по живым трекам: группируем по альбому и исполнителю.
-        # Исполнитель попадает в список, если у него есть хотя бы один живой трек.
-        sql = """
-            SELECT ar.id, ar.name, COUNT(DISTINCT a.id) AS album_count
-              FROM tracks t
-              JOIN albums a ON a.id = t.album_id
-              JOIN artists ar ON ar.id = a.artist_id
-             WHERE t.missing = 0
+        sql = (
+            _LIVE_LINKS
+            + """
+            SELECT ar.id, ar.name,
+                   COUNT(DISTINCT ll.album_id) AS album_count
+              FROM live_links ll
+              JOIN artists ar ON ar.id = ll.artist_id
              GROUP BY ar.id, ar.name
              ORDER BY ar.name COLLATE NOCASE
-        """
+            """
+        )
         params: list[object] = []
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
@@ -274,22 +293,32 @@ class LibraryRepository:
         ]
 
     async def count_artists(self) -> int:
-        """Исполнители с хотя бы одним треком — для пагинации списка."""
+        """Исполнители с хотя бы одним живым треком — для пагинации списка."""
         return int(
             await self._db.fetch_value(
-                """
-                SELECT COUNT(*) FROM (
-                    SELECT a.artist_id
-                      FROM tracks t
-                      JOIN albums a ON a.id = t.album_id
-                     WHERE t.missing = 0
-                     GROUP BY a.artist_id
-                )
-                """,
+                _LIVE_LINKS
+                + "SELECT COUNT(DISTINCT artist_id) FROM live_links"
+                " WHERE artist_id IS NOT NULL",
                 default=0,
             )
             or 0
         )
+
+    async def artist_track_counts(self, artist_ids: list[int]) -> dict[int, int]:
+        """Число живых треков каждого исполнителя (включая гостевые) — одним запросом."""
+        if not artist_ids:
+            return {}
+        placeholders = ",".join("?" for _ in artist_ids)
+        rows = await self._db.fetch_all(
+            f"""
+            SELECT t.artist_id AS artist_id, COUNT(*) AS n
+              FROM tracks t
+             WHERE t.missing = 0 AND t.artist_id IN ({placeholders})
+             GROUP BY t.artist_id
+            """,
+            tuple(artist_ids),
+        )
+        return {int(row["artist_id"]): int(row["n"]) for row in rows}
 
     async def artist_album_map(self, artist_ids: list[int]) -> dict[int, int]:
         """id первого непустого альбома для каждого исполнителя — одним запросом.
@@ -319,13 +348,11 @@ class LibraryRepository:
 
     async def get_artist(self, artist_id: int) -> ArtistRow | None:
         row = await self._db.fetch_one(
-            """
+            _LIVE_LINKS
+            + """
             SELECT ar.id, ar.name,
-                   (SELECT COUNT(*) FROM albums a
-                     WHERE a.artist_id = ar.id
-                       AND (SELECT COUNT(*) FROM tracks t
-                             WHERE t.album_id = a.id AND t.missing = 0) > 0)
-                   AS album_count
+                   (SELECT COUNT(DISTINCT ll.album_id) FROM live_links ll
+                     WHERE ll.artist_id = ar.id) AS album_count
               FROM artists ar WHERE ar.id = ?
             """,
             (artist_id,),
@@ -339,11 +366,13 @@ class LibraryRepository:
         )
 
     async def artist_albums(self, artist_id: int) -> list[AlbumRow]:
+        # Альбомы исполнителя: где он владелец или есть его трек (гость, фит).
         rows = await self._db.fetch_all(
-            f"{_ALBUM_SELECT} WHERE a.artist_id = ? "
-            "AND (SELECT COUNT(*) FROM tracks t WHERE t.album_id = a.id "
-            "AND t.missing = 0) > 0 "
-            "ORDER BY a.year, a.name COLLATE NOCASE",
+            _LIVE_LINKS
+            + f"{_ALBUM_SELECT} WHERE a.id IN ("
+            "  SELECT album_id FROM live_links"
+            "   WHERE artist_id = ? AND album_id IS NOT NULL"
+            ") ORDER BY a.year, a.name COLLATE NOCASE",
             (artist_id,),
         )
         return [_row_to_album(row) for row in rows]
@@ -421,26 +450,27 @@ class LibraryRepository:
         like = _like(query)
         if like is None:
             return []
-        # Сначала отбор по имени, затем один агрегат по живым трекам.
-        # Подзапрос на каждого исполнителя здесь был главной причиной тормозов.
+        limit = max(1, min(int(limit), 200))
+        # Сначала отбор по имени среди исполнителей с живыми треками, затем агрегат.
         rows = await self._db.fetch_all(
-            """
-            WITH matched AS (
+            _LIVE_LINKS
+            + """
+            , matched AS (
                 SELECT ar.id, ar.name
                   FROM artists ar
                  WHERE ar.name LIKE ? ESCAPE '\\'
+                   AND ar.id IN (SELECT artist_id FROM live_links)
                  ORDER BY ar.name COLLATE NOCASE
                  LIMIT ?
             )
             SELECT m.id AS id, m.name AS name,
-                   COUNT(DISTINCT a.id) AS album_count
+                   COUNT(DISTINCT ll.album_id) AS album_count
               FROM matched m
-              JOIN albums a ON a.artist_id = m.id
-              JOIN tracks t ON t.album_id = a.id AND t.missing = 0
+              JOIN live_links ll ON ll.artist_id = m.id
              GROUP BY m.id, m.name
              ORDER BY m.name COLLATE NOCASE
             """,
-            (like, max(1, min(limit, 200))),
+            (like, limit),
         )
         return [
             ArtistRow(int(row["id"]), str(row["name"]), int(row["album_count"] or 0))
